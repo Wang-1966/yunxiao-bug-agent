@@ -1,0 +1,9 @@
+修复 Bug：$title
+描述：$description
+用户补充与验收反馈：$feedback
+源码根因：$root_cause
+方案：$proposal
+请实施必要修改，保持兼容并添加必要回归测试。
+方案为用户确认的修复方向，实施前须重新核对相关源码；不要因为回答简短而省略必要修改或验证。
+
+$response_style

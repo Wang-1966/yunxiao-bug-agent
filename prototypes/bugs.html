@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bug 列表 - 云效 Bug 修复 Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --color-primary: #1E293B;
+            --color-on-primary: #FFFFFF;
+            --color-secondary: #334155;
+            --color-accent: #22C55E;
+            --color-background: #0F172A;
+            --color-foreground: #F8FAFC;
+            --color-muted: #272F42;
+            --color-border: #475569;
+            --color-destructive: #EF4444;
+            --gradient-primary: linear-gradient(135deg, #0052FF 0%, #4D7CFF 100%);
+            --gradient-success: linear-gradient(135deg, #22C55E 0%, #34D399 100%);
+            --gradient-warning: linear-gradient(135deg, #F59E0B 0%, #FBBF24 100%);
+            --gradient-danger: linear-gradient(135deg, #EF4444 0%, #F87171 100%);
+            --gradient-card: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%);
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            --shadow-glow: 0 0 20px rgba(34, 197, 94, 0.3);
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--color-background);
+            color: var(--color-foreground);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background:
+                radial-gradient(circle at 20% 50%, rgba(34, 197, 94, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(77, 124, 255, 0.1) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .header {
+            position: sticky;
+            top: 0;
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(71, 85, 105, 0.3);
+            padding: 16px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 100;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo {
+            width: 32px;
+            height: 32px;
+            background: var(--gradient-primary);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            box-shadow: var(--shadow-glow);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 20px rgba(34, 197, 94, 0.3); }
+            50% { box-shadow: 0 0 30px rgba(34, 197, 94, 0.5); }
+        }
+
+        .header-left h1 {
+            font-size: 18px;
+            font-weight: 600;
+            background: linear-gradient(135deg, #22C55E 0%, #4D7CFF 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header-right {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .icon-button {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            font-size: 18px;
+        }
+
+        .icon-button:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .icon-button:active {
+            transform: scale(0.96);
+        }
+
+        .user-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: var(--gradient-card);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .user-badge:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 32px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .page-header {
+            margin-bottom: 32px;
+            animation: slideUp 0.6s ease-out;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .page-header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, #F8FAFC 0%, rgba(248, 250, 252, 0.7) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .page-header p {
+            color: rgba(248, 250, 252, 0.6);
+            font-size: 14px;
+        }
+
+        .toolbar {
+            background: var(--gradient-card);
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            border-radius: 16px;
+            margin-bottom: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: var(--shadow-lg);
+            animation: slideUp 0.6s ease-out;
+            animation-delay: 0.1s;
+            animation-fill-mode: both;
+        }
+
+        .toolbar-row {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .toolbar-row + .toolbar-row {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .search-box {
+            flex: 1;
+            min-width: 300px;
+            position: relative;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 12px 16px 12px 44px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            color: var(--color-foreground);
+            font-size: 14px;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            transition: all 0.2s;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            background: rgba(255, 255, 255, 0.08);
+            border-color: var(--color-accent);
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.1);
+        }
+
+        .search-box::before {
+            content: '🔍';
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 16px;
+        }
+
+        .filter-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .filter-label {
+            font-size: 13px;
+            color: rgba(248, 250, 252, 0.6);
+            font-weight: 500;
+        }
+
+        .select {
+            padding: 8px 32px 8px 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            color: var(--color-foreground);
+            font-size: 13px;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            cursor: pointer;
+            transition: all 0.2s;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%23F8FAFC' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+        }
+
+        .select:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .select:focus {
+            outline: none;
+            border-color: var(--color-accent);
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.1);
+        }
+
+        .btn {
+            padding: 10px 18px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--color-foreground);
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-1px);
+        }
+
+        .btn:active {
+            transform: scale(0.96);
+        }
+
+        .btn-primary {
+            background: var(--gradient-success);
+            color: var(--color-on-primary);
+            border: none;
+            box-shadow: var(--shadow-glow);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 30px rgba(34, 197, 94, 0.5);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .selection-bar {
+            background: var(--gradient-primary);
+            padding: 12px 20px;
+            border-radius: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: var(--shadow-glow);
+        }
+
+        .selection-bar .info {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .selection-bar .actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .table-container {
+            background: var(--gradient-card);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+            box-shadow: var(--shadow-lg);
+            animation: slideUp 0.6s ease-out;
+            animation-delay: 0.2s;
+            animation-fill-mode: both;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead {
+            background: rgba(255, 255, 255, 0.03);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        th {
+            padding: 16px 20px;
+            text-align: left;
+            font-size: 13px;
+            font-weight: 600;
+            color: rgba(248, 250, 252, 0.6);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        th:first-child {
+            width: 40px;
+        }
+
+        tbody tr {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        tbody tr:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        tbody tr.selected {
+            background: rgba(34, 197, 94, 0.1);
+            border-color: rgba(34, 197, 94, 0.3);
+        }
+
+        td {
+            padding: 16px 20px;
+            font-size: 14px;
+        }
+
+        .checkbox {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: var(--color-accent);
+        }
+
+        .priority-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .priority-badge.critical {
+            background: rgba(239, 68, 68, 0.15);
+            color: #F87171;
+        }
+
+        .priority-badge.important {
+            background: rgba(245, 158, 11, 0.15);
+            color: #FBBF24;
+        }
+
+        .priority-badge.normal {
+            background: rgba(34, 197, 94, 0.15);
+            color: #34D399;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .bug-id {
+            font-weight: 600;
+            color: var(--color-accent);
+        }
+
+        .bug-title {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .bug-meta {
+            font-size: 12px;
+            color: rgba(248, 250, 252, 0.5);
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .action-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+
+        .action-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-1px);
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .pagination-info {
+            font-size: 13px;
+            color: rgba(248, 250, 252, 0.6);
+        }
+
+        .pagination-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .page-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .page-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .page-btn.active {
+            background: var(--gradient-success);
+            border-color: transparent;
+            box-shadow: var(--shadow-glow);
+        }
+
+        .page-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 16px;
+            }
+
+            .toolbar-row {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .search-box {
+                min-width: 100%;
+            }
+
+            .filter-group {
+                width: 100%;
+            }
+
+            .select {
+                flex: 1;
+            }
+
+            table {
+                font-size: 13px;
+            }
+
+            th, td {
+                padding: 12px 8px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">🤖</div>
+            <h1>云效 Bug 修复 Agent</h1>
+        </div>
+        <div class="header-right">
+            <button class="icon-button" onclick="window.location.href='dashboard.html'" aria-label="返回首页">🏠</button>
+            <button class="icon-button" aria-label="通知">🔔</button>
+            <button class="icon-button" aria-label="设置">⚙️</button>
+            <div class="user-badge">
+                <span>👤</span>
+                <span>用户名</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="page-header">
+            <h1>📋 Bug 列表</h1>
+            <p>从云效同步的所有待修复 Bug</p>
+        </div>
+
+        <!-- 工具栏 -->
+        <div class="toolbar">
+            <div class="toolbar-row">
+                <div class="search-box">
+                    <input type="text" placeholder="搜索 Bug ID、标题、描述..." id="searchInput">
+                </div>
+                <button class="btn" onclick="refreshBugs()">
+                    <span>🔄</span>
+                    <span>刷新</span>
+                </button>
+                <button class="btn" onclick="window.location.href='llm-config.html'">
+                    <span>⚙️</span>
+                    <span>LLM 配置</span>
+                </button>
+            </div>
+
+            <div class="toolbar-row">
+                <div class="filter-group">
+                    <span class="filter-label">优先级:</span>
+                    <select class="select" id="priorityFilter">
+                        <option value="">全部</option>
+                        <option value="critical">严重</option>
+                        <option value="important">重要</option>
+                        <option value="normal">普通</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <span class="filter-label">状态:</span>
+                    <select class="select" id="statusFilter">
+                        <option value="">全部</option>
+                        <option value="pending">待处理</option>
+                        <option value="fixing">修复中</option>
+                        <option value="testing">测试中</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <span class="filter-label">排序:</span>
+                    <select class="select" id="sortOrder">
+                        <option value="priority">优先级</option>
+                        <option value="time">创建时间</option>
+                        <option value="id">Bug ID</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="toolbar-row" id="selectionBar" style="display: none;">
+                <div class="selection-bar">
+                    <div class="info">已选择 <strong id="selectedCount">0</strong> 个 Bug</div>
+                    <div class="actions">
+                        <button class="btn" onclick="clearSelection()">
+                            <span>✕</span>
+                            <span>取消选择</span>
+                        </button>
+                        <button class="btn-primary" onclick="batchFix()" id="batchFixBtn" disabled>
+                            <span>🚀</span>
+                            <span>批量修复</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bug 列表 -->
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th><input type="checkbox" class="checkbox" id="selectAll"></th>
+                        <th>Bug ID</th>
+                        <th>标题 & 描述</th>
+                        <th>优先级</th>
+                        <th>状态</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="bugTableBody">
+                    <tr data-id="1234">
+                        <td><input type="checkbox" class="checkbox bug-checkbox"></td>
+                        <td><span class="bug-id">#1234</span></td>
+                        <td>
+                            <div class="bug-title">字幕段分类输入问题</div>
+                            <div class="bug-meta">修改字幕段分类，输入后 Tab 导致段...</div>
+                        </td>
+                        <td><span class="priority-badge critical">🔴 严重</span></td>
+                        <td><span class="status-badge">⏸ 待处理</span></td>
+                        <td>2024-01-15</td>
+                        <td>
+                            <div class="action-buttons">
+                                <button class="action-btn" title="查看详情">👁</button>
+                                <button class="action-btn" title="开始修复">▶️</button>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr data-id="1235">
+                        <td><input type="checkbox" class="checkbox bug-checkbox"></td>
+                        <td><span class="bug-id">#1235</span></td>
+                        <td>
+                            <div class="bug-title">新增道具排序错误</div>
+                            <div class="bug-meta">新增道具后，列表排序不符合预期...</div>
+                        </td>
+                        <td><span class="priority-badge important">🟡 重要</span></td>
+                        <td><span class="status-badge">⚙️ 修复中</span></td>
+                        <td>2024-01-14</td>
+                        <td>
+                            <div class="action-buttons">
+                                <button class="action-btn" title="查看详情">👁</button>
+                                <button class="action-btn" title="查看进度">📊</button>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr data-id="1236">
+                        <td><input type="checkbox" class="checkbox bug-checkbox"></td>
+                        <td><span class="bug-id">#1236</span></td>
+                        <td>
+                            <div class="bug-title">用户头像上传失败</div>
+                            <div class="bug-meta">上传大于 2MB 的图片时返回 500 错误...</div>
+                        </td>
+                        <td><span class="priority-badge important">🟡 重要</span></td>
+                        <td><span class="status-badge">⏸ 待处理</span></td>
+                        <td>2024-01-14</td>
+                        <td>
+                            <div class="action-buttons">
+                                <button class="action-btn" title="查看详情">👁</button>
+                                <button class="action-btn" title="开始修复">▶️</button>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr data-id="1237">
+                        <td><input type="checkbox" class="checkbox bug-checkbox"></td>
+                        <td><span class="bug-id">#1237</span></td>
+                        <td>
+                            <div class="bug-title">导出 Excel 中文乱码</div>
+                            <div class="bug-meta">导出数据表格时，中文字段显示乱码...</div>
+                        </td>
+                        <td><span class="priority-badge normal">🟢 普通</span></td>
+                        <td><span class="status-badge">⏸ 待处理</span></td>
+                        <td>2024-01-13</td>
+                        <td>
+                            <div class="action-buttons">
+                                <button class="action-btn" title="查看详情">👁</button>
+                                <button class="action-btn" title="开始修复">▶️</button>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr data-id="1238">
+                        <td><input type="checkbox" class="checkbox bug-checkbox"></td>
+                        <td><span class="bug-id">#1238</span></td>
+                        <td>
+                            <div class="bug-title">搜索结果分页跳转异常</div>
+                            <div class="bug-meta">点击第 2 页后，显示的仍是第 1 页数据...</div>
+                        </td>
+                        <td><span class="priority-badge normal">🟢 普通</span></td>
+                        <td><span class="status-badge">⏸ 待处理</span></td>
+                        <td>2024-01-12</td>
+                        <td>
+                            <div class="action-buttons">
+                                <button class="action-btn" title="查看详情">👁</button>
+                                <button class="action-btn" title="开始修复">▶️</button>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="pagination">
+                <div class="pagination-info">显示 1-5 / 共 15 条</div>
+                <div class="pagination-controls">
+                    <button class="page-btn" disabled>‹</button>
+                    <button class="page-btn active">1</button>
+                    <button class="page-btn">2</button>
+                    <button class="page-btn">3</button>
+                    <button class="page-btn">›</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 选择逻辑
+        const selectAllCheckbox = document.getElementById('selectAll');
+        const bugCheckboxes = document.querySelectorAll('.bug-checkbox');
+        const selectionBar = document.getElementById('selectionBar');
+        const selectedCountEl = document.getElementById('selectedCount');
+        const batchFixBtn = document.getElementById('batchFixBtn');
+
+        function updateSelectionState() {
+            const checkedCount = document.querySelectorAll('.bug-checkbox:checked').length;
+            selectedCountEl.textContent = checkedCount;
+
+            if (checkedCount > 0) {
+                selectionBar.style.display = 'block';
+                batchFixBtn.disabled = false;
+            } else {
+                selectionBar.style.display = 'none';
+                batchFixBtn.disabled = true;
+            }
+
+            selectAllCheckbox.checked = checkedCount === bugCheckboxes.length;
+            selectAllCheckbox.indeterminate = checkedCount > 0 && checkedCount < bugCheckboxes.length;
+
+            // 更新行的选中状态
+            document.querySelectorAll('tbody tr').forEach(row => {
+                const checkbox = row.querySelector('.bug-checkbox');
+                if (checkbox && checkbox.checked) {
+                    row.classList.add('selected');
+                } else {
+                    row.classList.remove('selected');
+                }
+            });
+        }
+
+        selectAllCheckbox.addEventListener('change', function() {
+            bugCheckboxes.forEach(cb => cb.checked = this.checked);
+            updateSelectionState();
+        });
+
+        bugCheckboxes.forEach(cb => {
+            cb.addEventListener('change', updateSelectionState);
+        });
+
+        function clearSelection() {
+            bugCheckboxes.forEach(cb => cb.checked = false);
+            updateSelectionState();
+        }
+
+        function batchFix() {
+            const selected = Array.from(document.querySelectorAll('.bug-checkbox:checked'))
+                .map(cb => cb.closest('tr').dataset.id);
+            alert(`准备批量修复 ${selected.length} 个 Bug:\n${selected.join(', ')}`);
+        }
+
+        function refreshBugs() {
+            alert('正在从云效刷新 Bug 列表...');
+        }
+
+        // 行点击选择
+        document.querySelectorAll('tbody tr').forEach(row => {
+            row.addEventListener('click', function(e) {
+                if (e.target.type !== 'checkbox' && !e.target.closest('.action-buttons')) {
+                    const checkbox = this.querySelector('.bug-checkbox');
+                    checkbox.checked = !checkbox.checked;
+                    updateSelectionState();
+                }
+            });
+        });
+
+        // 初始化
+        updateSelectionState();
+    </script>
+</body>
+</html>

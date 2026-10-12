@@ -1,0 +1,144 @@
+"""统一 LLM 客户端"""
+from openai import AsyncOpenAI
+from typing import AsyncIterator, List, Dict, Any, Optional
+from loguru import logger
+import json
+import time
+
+from ..models.llm_config import LLMProvider
+from .diagnostics import response_summary
+
+
+class UnifiedLLMClient:
+    """统一的 LLM 客户端（所有 LLM 都用 OpenAI 兼容格式）"""
+
+    def __init__(self, provider: LLMProvider):
+        self.provider = provider
+        self.client = AsyncOpenAI(
+            api_key=provider.api_key,
+            base_url=provider.base_url,
+        )
+
+    async def ainvoke(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 8000,
+        on_chunk=None,
+        on_response=None,
+        log_context=None,
+        **kwargs
+    ) -> str:
+        """
+        调用 LLM 生成响应
+
+        Args:
+            messages: 消息列表，格式 [{"role": "user", "content": "..."}]
+            model: 模型名称
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+            **kwargs: 其他参数
+
+        Returns:
+            生成的文本内容
+        """
+        chunks, diagnostics = [], {}
+        try:
+            async for chunk in self.astream(messages, model, temperature, max_tokens, diagnostics=diagnostics, log_context=log_context, **kwargs):
+                chunks.append(chunk)
+                if on_chunk:
+                    await on_chunk(chunk)
+            return ''.join(chunks)
+
+        except Exception as e:
+            logger.error(
+                f"LLM call failed: provider={self.provider.id}, "
+                f"model={model}, error={str(e)}"
+            )
+            raise
+        finally:
+            if on_response:
+                on_response({**diagnostics, **response_summary(''.join(chunks), (self.provider.api_key,))})
+
+    async def astream(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 8000,
+        diagnostics=None,
+        log_context=None,
+        **kwargs,
+    ) -> AsyncIterator[str]:
+        """以 OpenAI 兼容的 SSE 流读取文本片段；调用方可自行累积成 JSON。"""
+        start_time = time.time()
+        diagnostics = diagnostics if diagnostics is not None else {}
+        diagnostics.update(provider=self.provider.id, model=model, context=log_context,
+                           stream_chunks=0, content_chars=0, reasoning_chars=0, finish_reasons=[])
+        delta_fields = set()
+        response = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            **kwargs,
+        )
+        try:
+            async for chunk in response:
+                diagnostics['stream_chunks'] += 1
+                if getattr(chunk, 'id', None):
+                    diagnostics['response_id'] = chunk.id
+                if getattr(chunk, 'model', None):
+                    diagnostics['response_model'] = chunk.model
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta:
+                    values = delta.model_dump(exclude_none=True) if hasattr(delta, 'model_dump') else vars(delta)
+                    delta_fields.update(key for key, value in values.items() if value is not None)
+                    diagnostics['reasoning_chars'] += len(getattr(delta, 'reasoning_content', None) or '')
+                reason = getattr(chunk.choices[0], 'finish_reason', None) if chunk.choices else None
+                if reason:
+                    diagnostics['finish_reasons'].append(reason)
+                if chunk.choices and getattr(chunk.choices[0], 'finish_reason', None) == 'length':
+                    raise ValueError('模型响应达到输出长度上限，返回内容不完整')
+                content = getattr(delta, 'content', None) if delta else None
+                if content:
+                    diagnostics['content_chars'] += len(content)
+                    yield content
+            latency = (time.time() - start_time) * 1000
+            logger.info(f'LLM stream succeeded: provider={self.provider.id}, model={model}, latency={latency:.0f}ms')
+        except Exception as e:
+            diagnostics['error_type'] = type(e).__name__
+            logger.error(
+                f"LLM stream failed: provider={self.provider.id}, model={model}, error={e}"
+            )
+            raise
+        finally:
+            diagnostics['delta_fields'] = sorted(delta_fields)
+            diagnostics['latency_ms'] = round((time.time() - start_time) * 1000)
+            logger.info('LLM response diagnostics: {}', json.dumps(diagnostics, ensure_ascii=False))
+            await response.close()
+
+    async def test_connection(self) -> tuple[bool, Optional[float]]:
+        """
+        测试 API 连接
+
+        Returns:
+            (是否成功, 延迟毫秒数)
+        """
+        try:
+            start_time = time.time()
+
+            await self.ainvoke(
+                messages=[{"role": "user", "content": "test"}],
+                model=self.provider.default_model,
+                max_tokens=10
+            )
+
+            latency = (time.time() - start_time) * 1000
+            return True, latency
+
+        except Exception as e:
+            logger.error(f"Connection test failed: {e}")
+            return False, None

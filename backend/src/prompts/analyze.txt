@@ -1,0 +1,23 @@
+你是一个专业的代码分析专家。请分析以下 Bug 的根本原因。
+
+Bug 信息：
+- ID: $bug_id
+- 标题: $title
+- 描述: $description
+- 用户补充与验收反馈: $feedback
+
+用户反馈是修正问题理解的重要信息。请根据反馈重新核对源码，不要沿用已被纠正的假设。
+
+请提供：
+1. 根本原因分析
+2. 置信度（high/medium/low）
+3. 是否需要添加日志来验证（true/false）
+
+以 JSON 格式返回：
+{
+    "root_cause": "根本原因描述",
+    "confidence": "high/medium/low",
+    "need_logging": true/false
+}
+
+$response_style

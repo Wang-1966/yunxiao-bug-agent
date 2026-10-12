@@ -1,0 +1,3 @@
+剩余有效源码操作 $remaining 轮。
+$stage_goal
+必须预留修改和结束所需操作，停止无关搜索。无法继续时使用finish返回blocked_reason说明具体缺失信息。

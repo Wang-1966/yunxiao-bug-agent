@@ -13,12 +13,15 @@ from ..core.bug_visual import describe_bug_images, visual_prompt, visual_source
 def build_agent_prompt(stage, state, **context):
     bug = state['bug_info']
     style = LLMFactory.get_response_style()
+    feedback = state.get('repair_feedback') or bug.get('repair_feedback') or ''
+    if state.get('retry_context'):
+        feedback = '\n\n'.join(filter(None, [feedback, state['retry_context']]))
     return render_prompt(
         stage,
         bug_id=bug.get('id', state['bug_id']),
         title=bug['title'],
         description=bug.get('description') or '',
-        feedback=state.get('repair_feedback') or bug.get('repair_feedback') or '无',
+        feedback=feedback or '无',
         root_cause=state.get('root_cause') or 'N/A',
         response_style=render_prompt(f'styles/{style}'),
         **context,

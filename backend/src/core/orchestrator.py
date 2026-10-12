@@ -4,6 +4,7 @@ import json
 import uuid
 import aiosqlite
 from itertools import count
+from pathlib import Path
 from typing import Dict, Optional, List
 from loguru import logger
 from dataclasses import dataclass
@@ -16,6 +17,16 @@ from .projects import resolve_project_config
 
 settings = get_settings()
 
+STAGE_PROGRESS = {"analyzing": 10, "proposing": 30, "awaiting_plan_confirmation": 35, "fixing": 50, "verifying": 75, "awaiting_confirmation": 90, "completed": 90}
+# 续跑起点 -> (阶段, Bug 状态, 进度, 页面说明)
+RESUME_POINTS = {
+    'fetch_bug': ('analyzing', 'analyzing', 0, '获取 Bug 详情'),
+    'analyze_root_cause': ('analyzing', 'analyzing', 10, '根因分析'),
+    'design_proposal': ('proposing', 'analyzing', 30, '方案生成'),
+    'implement_fix': ('fixing', 'fixing', 45, '代码修复'),
+    'verify_fix': ('verifying', 'testing', 75, '验证'),
+}
+
 
 @dataclass
 class Task:
@@ -25,6 +36,8 @@ class Task:
     priority: int
     created_at: datetime
     status: str = "pending"  # pending, running, completed, failed
+    start_node: str = "fetch_bug"
+    resume_state: Optional[dict] = None
 
 
 class MultiAgentOrchestrator:
@@ -190,10 +203,10 @@ class MultiAgentOrchestrator:
 
         logger.info(f"Starting agent {agent_id} for bug {task.bug_id}")
 
-        # 创建 Agent 任务
-        agent_task = asyncio.create_task(
-            self._run_agent(agent_id, task)
-        )
+        if task.resume_state is not None:
+            agent_task = asyncio.create_task(self._resume_from(agent_id, task, task.resume_state, task.start_node))
+        else:
+            agent_task = asyncio.create_task(self._run_agent(agent_id, task))
 
         self.running_agents[agent_id] = agent_task
 
@@ -273,10 +286,11 @@ class MultiAgentOrchestrator:
                             await db.execute('UPDATE agents SET worktree_path=? WHERE agent_id=?', (state['worktree_path'], agent_id))
                             await db.commit()
                     if state.get("error"):
+                        state['failed_node'] = next(iter(output), None)
                         raise RuntimeError(state["error"])
                     stage = state.get("stage", "analyzing")
                     bug_status = {"proposing": "analyzing", "awaiting_plan_confirmation": "awaiting_plan_confirmation", "verifying": "testing", "awaiting_confirmation": "awaiting_confirmation", "completed": "testing"}.get(stage, stage)
-                    self.agent_states[agent_id]["progress"] = {"analyzing": 10, "proposing": 30, "awaiting_plan_confirmation": 35, "fixing": 50, "verifying": 75, "awaiting_confirmation": 90, "completed": 90}.get(stage, 0)
+                    self.agent_states[agent_id]["progress"] = STAGE_PROGRESS.get(stage, 0)
                     message = f"当前阶段：{stage}"
                     if 'prepare_repository' in output:
                         message = f"已创建隔离工作树：{state['worktree_path']}，分支：{state['repair_branch']}"
@@ -327,7 +341,7 @@ class MultiAgentOrchestrator:
             runtime = self.agent_states.get(agent_id, {})
             state = runtime.get('state', {})
             # 只保存审查需要的信息，避免把签名 URL、截图数据或整份 Bug 正文写入结果。
-            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'proposals', 'selected_proposal', 'fix_summary', 'modified_files', 'test_results', 'error', 'repair_feedback') if key in state}
+            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'proposals', 'selected_proposal', 'fix_summary', 'modified_files', 'test_results', 'error', 'failed_node', 'repair_feedback') if key in state}
             result['progress'] = runtime.get('progress', 0)
             # 只持久化文字观察和正文指纹；原图由详情加载链路在恢复时重新取得。
             result['visual_context'] = state.get('visual_context')
@@ -398,7 +412,11 @@ class MultiAgentOrchestrator:
         return {'agent_id': agent_id, 'status': stage}
 
     async def _resume_proposal(self, agent_id, task, state, reanalyze):
+        await self._resume_from(agent_id, task, state, 'analyze_root_cause' if reanalyze else 'implement_fix')
+
+    async def _resume_from(self, agent_id, task, state, start_node):
         # 详情加载与图执行都属于后台任务，异常由统一任务状态记录。
+        task.status = 'running'
         try:
             from ..agent.nodes import fetch_bug_node
             result = await fetch_bug_node(state)
@@ -410,7 +428,7 @@ class MultiAgentOrchestrator:
                 row = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (task.bug_id,))).fetchone()
                 config = await resolve_project_config(db, dict(row))
             state['bug_info'].update({key: config.get(key) for key in ('repo_path', 'branch', 'test_command')})
-            workflow = compile_graph(create_bug_fix_graph(start_node='analyze_root_cause' if reanalyze else 'implement_fix'))
+            workflow = compile_graph(create_bug_fix_graph(start_node=start_node))
             await self._run_agent_from_state(agent_id, task, state, workflow)
         except asyncio.CancelledError:
             await self._record_cancellation(agent_id, task)
@@ -429,8 +447,10 @@ class MultiAgentOrchestrator:
                         self.agent_states[agent_id]['state'].update(value)
                 current = self.agent_states[agent_id]['state']
                 if current.get('error'):
+                    current['failed_node'] = next(iter(output), None)
                     raise RuntimeError(current['error'])
                 stage = current.get('stage', 'fixing')
+                self.agent_states[agent_id]['progress'] = STAGE_PROGRESS.get(stage, self.agent_states[agent_id].get('progress', 0))
                 bug_status = {'analyzing': 'analyzing', 'proposing': 'analyzing', 'awaiting_plan_confirmation': 'awaiting_plan_confirmation', 'verifying': 'testing', 'awaiting_confirmation': 'awaiting_confirmation'}.get(stage, 'fixing')
                 await self._save_status(agent_id, task, 'busy', bug_status, f'当前阶段：{stage}')
             current = self.agent_states[agent_id]['state']
@@ -450,6 +470,98 @@ class MultiAgentOrchestrator:
             self.agent_states[agent_id].update(status='failed', error=str(exc))
             self.agent_states[agent_id]['state'].update(stage='failed', error=str(exc))
             await self._save_status(agent_id, task, 'error', 'failed', f'任务执行失败：{exc}')
+
+    @staticmethod
+    async def _resume_point(saved: dict) -> tuple:
+        """返回 (起点节点, 原因)；起点为 None 表示原任务无法续跑，需新建任务。"""
+        from .repair_executor import git
+        worktree = saved.get('worktree_path')
+        if not worktree:
+            return 'fetch_bug', '尚未创建修复工作树'
+        if not Path(worktree).is_dir():
+            return 'fetch_bug', '原修复工作树已不存在'
+        try:
+            head = await git(worktree, 'rev-parse', 'HEAD')
+            branch = await git(worktree, 'branch', '--show-current')
+        except ValueError:
+            return 'fetch_bug', '原修复工作树已损坏'
+        if head != saved.get('base_commit') or branch != saved.get('repair_branch'):
+            return None, '原修复工作树已生成提交或切换分支'
+        if saved.get('failed_node') == 'verify_fix' and not saved.get('test_results'):
+            return 'verify_fix', '验证命令未能执行'
+        if saved.get('selected_proposal'):
+            return 'implement_fix', '已确认修复方案'
+        if saved.get('root_cause'):
+            return 'design_proposal', '已完成根因分析'
+        return 'analyze_root_cause', '已创建修复工作树'
+
+    async def retry_agent(self, agent_id: str, priority: int = 5) -> dict:
+        """失败任务从失败阶段继续执行，复用原工作树与已完成阶段的结果。
+
+        已提交验收（存在 verify 决策）的任务交付记录与 task_id 绑定，按反馈新建任务重新修复。
+        """
+        if not self._running:
+            raise RuntimeError("任务调度器未启动")
+        async with self._agent_control_lock:
+            db_path = settings.database_url.replace('sqlite+aiosqlite:///', '')
+            async with aiosqlite.connect(db_path) as db:
+                db.row_factory = aiosqlite.Row
+                agent = await (await db.execute('SELECT * FROM agents WHERE agent_id=?', (agent_id,))).fetchone()
+                if agent is None:
+                    raise KeyError(agent_id)
+                history = await (await db.execute('SELECT * FROM task_history WHERE agent_id=? ORDER BY id DESC LIMIT 1', (agent_id,))).fetchone()
+                bug = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (agent['current_bug_id'],))).fetchone()
+                reviewed = await (await db.execute("SELECT 1 FROM decisions WHERE agent_id=? AND stage='verify'", (agent_id,))).fetchone()
+            if agent['status'] != 'error' or agent_id in self.running_agents or not history:
+                raise ValueError('只有已失败或已停止的任务可以重新执行')
+            if not bug or bug['assigned_agent_id'] != agent_id or bug['status'] != 'failed' or (bug['source_status'] or '') in ('已修复', '已关闭', '暂不修复'):
+                raise ValueError('该 Bug 已由其他任务处理或不可修复，请刷新页面')
+            saved = json.loads(history['result'] or '{}')
+            if reviewed:
+                start_node, reason = None, '上次修复已提交验收'
+            else:
+                start_node, reason = await self._resume_point(saved)
+            if start_node is None:
+                bug_id = bug['bug_id']
+            else:
+                stage, bug_status, progress, label = RESUME_POINTS[start_node]
+                message = f'重新执行：{reason}，从「{label}」继续'
+                if start_node != 'fetch_bug':
+                    message += f"，复用工作树 {saved['worktree_path']}"
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute('BEGIN IMMEDIATE')
+                    cursor = await db.execute(
+                        "UPDATE bugs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE bug_id=? AND assigned_agent_id=? AND status='failed'",
+                        (bug_status, bug['bug_id'], agent_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ValueError('该 Bug 已由其他任务处理，请刷新页面')
+                    await db.execute("UPDATE agents SET status='busy', updated_at=CURRENT_TIMESTAMP WHERE agent_id=?", (agent_id,))
+                    await db.execute("UPDATE task_history SET stage='queued', status='running', error=NULL, end_time=NULL WHERE id=?", (history['id'],))
+                    await db.execute("INSERT INTO agent_logs (agent_id, bug_id, log_level, message) VALUES (?, ?, 'info', ?)", (agent_id, bug['bug_id'], message))
+                    await db.commit()
+        if start_node is None:
+            task_id = await self.submit_task(bug_id, priority)
+            return {'agent_id': f'agent-{task_id}', 'task_id': task_id, 'mode': 'restart', 'reason': reason}
+
+        task = Task(task_id=history['task_id'], bug_id=bug['bug_id'], priority=priority, created_at=datetime.now(), start_node=start_node)
+        if start_node != 'fetch_bug':
+            cleared = {
+                'analyze_root_cause': {'root_cause': None, 'proposals': [], 'selected_proposal': None, 'modified_files': []},
+                'design_proposal': {'proposals': [], 'selected_proposal': None, 'modified_files': []},
+            }.get(start_node, {})
+            previous_error = history['error'] or saved.get('error')
+            task.resume_state = {
+                **saved, **cleared,
+                'bug_id': bug['bug_id'], 'bug_info': {}, 'stage': stage, 'test_results': {},
+                'waiting_for_user': False, 'user_decision': None, 'require_plan_confirmation': True,
+                'error': None, 'failed_node': None,
+                'retry_context': f'上次执行失败：{previous_error}。请针对该失败继续，不要重复同样的问题。' if previous_error else None,
+            }
+        self.agent_states[agent_id] = {'agent_id': agent_id, 'task': task, 'state': task.resume_state or {'stage': 'queued'}, 'status': 'queued', 'progress': progress}
+        self.task_queue.put_nowait((-priority, next(self._sequence), task))
+        logger.info(f'Agent {agent_id} retry queued from {start_node}')
+        return {'agent_id': agent_id, 'task_id': task.task_id, 'mode': 'resume', 'start_node': start_node, 'stage_label': label, 'reason': reason}
 
     async def _record_cancellation(self, agent_id: str, task: Task):
         runtime = self.agent_states.get(agent_id, {})

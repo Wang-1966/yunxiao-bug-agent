@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Table, Tag, Progress, Button, Timeline, message, Modal, Descriptions } from 'antd';
-import { PauseCircleOutlined, PlayCircleOutlined, StopOutlined, ReloadOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Table, Tag, Progress, Button, Timeline, message, Modal, Descriptions, Dropdown, Space } from 'antd';
+import { PauseCircleOutlined, PlayCircleOutlined, StopOutlined, ReloadOutlined, DeleteOutlined, DownOutlined } from '@ant-design/icons';
 import { agentService } from '../../services/agentService';
 import { bugService } from '../../services/bugService';
 import BugLink from '../Bugs/BugLink';
@@ -90,17 +90,19 @@ const AgentList: React.FC = () => {
     });
   };
 
-  const handleRetry = async (bug: Bug) => {
-    if (retryingBugs.includes(bug.bug_id)) return;
+  const handleRetry = async (agent: AgentStatus, fromScratch = false) => {
+    const bug = agent.current_bug;
+    if (!bug || retryingBugs.includes(bug.bug_id)) return;
     setRetryingBugs((ids) => [...ids, bug.bug_id]);
     try {
-      await bugService.submitTask({ bug_id: bug.bug_id, priority: 5 });
-      setAgents((items) => items.map((agent) =>
-        agent.current_bug?.bug_id === bug.bug_id
-          ? { ...agent, current_bug: { ...agent.current_bug, status: 'analyzing' } }
-          : agent
-      ));
-      message.success('已创建新的修复任务，将从头执行；原任务日志已保留');
+      if (fromScratch) {
+        await bugService.submitTask({ bug_id: bug.bug_id, priority: 5 });
+        message.success('已创建新的修复任务，将从头执行；原任务日志已保留');
+      } else {
+        const result = await agentService.retry(agent.agent_id);
+        if (result.mode === 'resume') message.success(`已从「${result.stage_label}」继续执行（${result.reason}）`);
+        else message.info(`${result.reason}，已创建新的修复任务从头执行；原任务记录已保留`);
+      }
       await loadAgents();
     } catch (error) {
       message.error(axios.isAxiosError(error) ? error.response?.data?.detail || '重新执行失败' : '重新执行失败');
@@ -172,17 +174,20 @@ const AgentList: React.FC = () => {
           </Button>}
           </div>
           <div className="agent-task-controls">
-          {record.status === 'error' && (
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              loading={!!record.current_bug && retryingBugs.includes(record.current_bug.bug_id)}
-              disabled={!record.current_bug || record.current_bug.status !== 'failed' || ['已修复', '已关闭', '暂不修复'].includes(record.current_bug.source_status || '')}
-              onClick={() => record.current_bug && handleRetry(record.current_bug)}
-            >
-              重新执行
-            </Button>
-          )}
+          {record.status === 'error' && (() => {
+            const retrying = !!record.current_bug && retryingBugs.includes(record.current_bug.bug_id);
+            const disabled = retrying || !record.current_bug || record.current_bug.status !== 'failed' || record.current_bug.assigned_agent_id !== record.agent_id || ['已修复', '已关闭', '暂不修复'].includes(record.current_bug.source_status || '');
+            return (
+              <Space.Compact size="small">
+                <Button size="small" icon={<ReloadOutlined />} loading={retrying} disabled={disabled} title="从失败的阶段继续，复用已有工作树和分析结果" onClick={() => handleRetry(record)}>
+                  重新执行
+                </Button>
+                <Dropdown disabled={disabled} trigger={['click']} menu={{ items: [{ key: 'scratch', label: '从头重新执行（新建任务）' }], onClick: () => handleRetry(record, true) }}>
+                  <Button size="small" icon={<DownOutlined />} disabled={disabled} />
+                </Dropdown>
+              </Space.Compact>
+            );
+          })()}
           {record.status === 'busy' && (
             <>
               <Button

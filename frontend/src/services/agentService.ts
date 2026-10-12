@@ -33,6 +33,11 @@ export const agentService = {
     return response.data;
   },
 
+  async retry(agentId: string) {
+    const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/retry`);
+    return response.data as { agent_id: string; task_id: string; mode: 'resume' | 'restart'; start_node?: string; stage_label?: string; reason: string };
+  },
+
   // 暂停 Agent
   async pause(agentId: string) {
     const response = await api.post(`/api/agents/${agentId}/pause`);

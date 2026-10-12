@@ -202,6 +202,19 @@ async def stop_agent(agent_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post('/{agent_id}/retry')
+async def retry_agent(agent_id: str):
+    """从失败阶段继续执行；原任务无法续跑时新建任务。"""
+    try:
+        return await get_orchestrator().retry_agent(agent_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail='Agent 不存在')
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
 @router.post('/{agent_id}/confirmation')
 async def confirm_agent_repair(agent_id: str, request: RepairConfirmation):
     from ..core.repair_review import confirm_repair

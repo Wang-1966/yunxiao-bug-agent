@@ -31,40 +31,55 @@ def should_wait_user(state: BugFixState) -> str:
     return "design_proposal"
 
 
+STAGE_ORDER = (
+    'fetch_bug',
+    'prepare_repository',
+    'analyze_root_cause',
+    'add_logging',
+    'design_proposal',
+    'implement_fix',
+    'verify_fix',
+)
+
+
+def _unless_error(target: str):
+    return lambda state: END if state.get('error') else target
+
+
 def create_bug_fix_graph(start_node: str = "fetch_bug") -> StateGraph:
-    """创建 Bug 修复状态图"""
+    """创建 Bug 修复状态图；从 start_node 开始，只包含其后的节点。"""
+    if start_node not in STAGE_ORDER or start_node == 'add_logging':
+        raise ValueError(f'不支持从 {start_node} 开始执行')
+    nodes = {
+        'fetch_bug': fetch_bug_node,
+        'prepare_repository': prepare_repository_node,
+        'analyze_root_cause': analyze_root_cause_node,
+        'add_logging': add_logging_node,
+        'design_proposal': design_proposal_node,
+        'implement_fix': implement_fix_node,
+        'verify_fix': verify_fix_node,
+    }
+    included = STAGE_ORDER[STAGE_ORDER.index(start_node):]
 
-    # 创建状态图
     workflow = StateGraph(BugFixState)
-
-    # 添加节点
-    if start_node == 'fetch_bug':
-        workflow.add_node("fetch_bug", fetch_bug_node)
-        workflow.add_node("prepare_repository", prepare_repository_node)
-    if start_node != 'implement_fix':
-        workflow.add_node("analyze_root_cause", analyze_root_cause_node)
-        workflow.add_node("add_logging", add_logging_node)
-        workflow.add_node("design_proposal", design_proposal_node)
-    workflow.add_node("implement_fix", implement_fix_node)
-    workflow.add_node("verify_fix", verify_fix_node)
-
-    # 设置入口点
+    for name in included:
+        workflow.add_node(name, nodes[name])
     workflow.set_entry_point(start_node)
 
-    # 添加边（定义流程）
-    if start_node == 'fetch_bug':
-        workflow.add_conditional_edges('fetch_bug', lambda state: END if state.get('error') else 'prepare_repository', {END: END, 'prepare_repository': 'prepare_repository'})
-        workflow.add_conditional_edges('prepare_repository', lambda state: END if state.get('error') else 'analyze_root_cause', {END: END, 'analyze_root_cause': 'analyze_root_cause'})
+    if 'fetch_bug' in included:
+        workflow.add_conditional_edges('fetch_bug', _unless_error('prepare_repository'), {END: END, 'prepare_repository': 'prepare_repository'})
+        workflow.add_conditional_edges('prepare_repository', _unless_error('analyze_root_cause'), {END: END, 'analyze_root_cause': 'analyze_root_cause'})
 
     # 分析后：需要日志 -> 添加日志 -> 设计方案
     #         不需要日志 -> 设计方案
-    if start_node != 'implement_fix':
+    if 'analyze_root_cause' in included:
         workflow.add_conditional_edges(
             "analyze_root_cause",
             should_add_logging,
             {"add_logging": "add_logging", "design_proposal": "design_proposal", END: END},
         )
-        workflow.add_conditional_edges('add_logging', lambda state: END if state.get('error') else 'design_proposal', {END: END, 'design_proposal': 'design_proposal'})
+        workflow.add_conditional_edges('add_logging', _unless_error('design_proposal'), {END: END, 'design_proposal': 'design_proposal'})
+    if 'design_proposal' in included:
         # 调度器传入 require_plan_confirmation 时暂停；底层图的历史直接调用保持兼容。
         workflow.add_conditional_edges(
             'design_proposal',
@@ -73,7 +88,8 @@ def create_bug_fix_graph(start_node: str = "fetch_bug") -> StateGraph:
         )
 
     # 实施修复后 -> 验证
-    workflow.add_conditional_edges('implement_fix', lambda state: END if state.get('error') else 'verify_fix', {END: END, 'verify_fix': 'verify_fix'})
+    if 'implement_fix' in included:
+        workflow.add_conditional_edges('implement_fix', _unless_error('verify_fix'), {END: END, 'verify_fix': 'verify_fix'})
 
     # 验证完成 -> 结束
     workflow.add_edge("verify_fix", END)

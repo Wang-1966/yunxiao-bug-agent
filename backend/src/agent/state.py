@@ -42,3 +42,5 @@ class BugFixState(TypedDict):
 
     # 错误信息
     error: Optional[str]
+    failed_node: Optional[str]
+    retry_context: Optional[str]

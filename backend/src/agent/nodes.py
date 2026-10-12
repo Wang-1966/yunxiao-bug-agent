@@ -1,5 +1,6 @@
 """Agent 节点实现"""
 from typing import Dict, Any
+from pathlib import Path
 from loguru import logger
 
 from .state import BugFixState
@@ -8,6 +9,7 @@ from ..prompts import render_prompt
 from ..core.repair_executor import prepare_worktree, repository_agent, changed_files, verify_and_commit_repair, parse_json
 from ..core.bug_media import agent_bug_images
 from ..core.bug_visual import describe_bug_images, visual_prompt, visual_source
+from ..llm.diagnostics import response_summary
 
 
 def build_agent_prompt(stage, state, **context):
@@ -160,16 +162,36 @@ async def design_proposal_node(state: BugFixState) -> Dict[str, Any]:
 
         prompt = build_agent_prompt('propose', state)
 
-        messages = [{"role": "user", "content": prompt + visual_prompt(state.get('visual_context'))}]
-        response = await llm.ainvoke(messages, temperature=0.2)
+        messages = [
+            {
+                "role": "system",
+                "content": "你是修复方案设计器。必须只返回一个 JSON 对象，不要输出 Markdown、解释文字或 JSON 之外的内容；对象必须包含 proposals 数组。",
+            },
+            {"role": "user", "content": prompt + visual_prompt(state.get('visual_context'))},
+        ]
+        response_diagnostics = {}
+        log_context = f"{Path(state['worktree_path']).name}/propose"
+        response = await llm.ainvoke(
+            messages,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            on_response=response_diagnostics.update,
+            log_context=log_context,
+        )
 
         # 解析响应
         import json
-        result = parse_json(response)
-
-        proposals = result.get("proposals", [])
-        if not proposals:
-            raise ValueError('模型未返回可执行的修复方案')
+        try:
+            result = parse_json(response)
+            proposals = result.get("proposals", [])
+            if not proposals:
+                raise ValueError('模型未返回可执行的修复方案')
+        except ValueError:
+            diagnostic = response_diagnostics or response_summary(response)
+            message = f'方案模型响应解析失败：{log_context}；{json.dumps(diagnostic, ensure_ascii=False)}'
+            logger.warning(message)
+            await record_source_operation(state, message)
+            raise
         logger.info(f"Generated {len(proposals)} proposals")
 
         return {

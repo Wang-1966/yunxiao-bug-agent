@@ -64,7 +64,12 @@ async def test_response_style_reaches_analysis_proposal_and_fix(style, label, tm
     assert result['fix_summary'] == '已修正新增初始化'
     assert result['stage'] == 'verifying'
 
-    prompts = [operation.call_args_list[0].args[2], llm.ainvoke.call_args.args[0][0]['content'], operation.call_args_list[1].args[2]]
+    proposal_messages = llm.ainvoke.call_args.args[0]
+    assert proposal_messages[0]['role'] == 'system'
+    assert 'JSON' in proposal_messages[0]['content']
+    assert llm.ainvoke.call_args.kwargs['response_format'] == {'type': 'json_object'}
+    assert llm.ainvoke.call_args.kwargs['log_context'] == f'{tmp_path.name}/propose'
+    prompts = [operation.call_args_list[0].args[2], proposal_messages[-1]['content'], operation.call_args_list[1].args[2]]
     for prompt in prompts:
         assert f'回答风格：{label}' in prompt
         assert '输入包含 $title 和 {value}' in prompt
@@ -72,3 +77,32 @@ async def test_response_style_reaches_analysis_proposal_and_fix(style, label, tm
         assert '不降低源码核对、置信度判断、兼容性或验证要求' in prompt
     assert 'form.vue' in prompts[1]
     assert '修正初始化' in prompts[2]
+
+
+@pytest.mark.asyncio
+async def test_invalid_proposal_response_records_diagnostics(tmp_path, monkeypatch):
+    from src.llm.diagnostics import response_summary
+    response = '先给出方案。{"proposals":[]} Bearer sensitive-token'
+    diagnostics = {'provider': 'relay', 'finish_reasons': ['stop'], **response_summary(response)}
+
+    async def invoke(messages, **kwargs):
+        kwargs['on_response'](diagnostics)
+        return response
+
+    llm = AsyncMock()
+    llm.ainvoke.side_effect = invoke
+    monkeypatch.setattr(LLMFactory, 'create', lambda **kwargs: llm)
+    operation = AsyncMock()
+    monkeypatch.setattr(nodes, 'record_source_operation', operation)
+    result = await nodes.design_proposal_node({
+        'bug_id': 'one', 'worktree_path': str(tmp_path), 'bug_info': {'title': 'bug'},
+        'root_cause': 'wrong value',
+    })
+
+    assert result['stage'] == 'completed'
+    assert '无效 JSON' in result['error']
+    assert not result.get('waiting_for_user')
+    message = operation.await_args.args[1]
+    assert f'{tmp_path.name}/propose' in message
+    assert 'response_sha256' in message and 'relay' in message and '先给出方案' in message
+    assert 'sensitive-token' not in message

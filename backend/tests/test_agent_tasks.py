@@ -383,7 +383,8 @@ async def test_proposal_feedback_reanalyzes_until_explicit_confirmation(task_db,
         assert all(not writable for _, writable in seen)
         assert '实际问题是无法输入' in seen[-1][0] and '仅发生在分式公式之后' in seen[-1][0]
         for call in client.ainvoke.call_args_list:
-            assert '实际问题是无法输入' in call.args[0][0]['content']
+            user_messages = [message['content'] for message in call.args[0] if message['role'] == 'user']
+            assert any('实际问题是无法输入' in content for content in user_messages)
         runner = orchestrator.MultiAgentOrchestrator()
         result = await runner.confirm_proposal(agent_id, 0)
         assert result['status'] == 'fixing'

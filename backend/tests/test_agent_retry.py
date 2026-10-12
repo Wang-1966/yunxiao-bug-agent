@@ -194,6 +194,23 @@ async def test_retry_rejects_running_reassigned_or_duplicate(task_db, worktree):
         assert await (await db.execute("SELECT assigned_agent_id FROM bugs WHERE bug_id='one'")).fetchone() == (f'agent-{new_task}',)
 
 
+@pytest.mark.asyncio
+async def test_legacy_failure_resumes_after_newer_task_is_deleted(task_db, worktree):
+    runner = orchestrator.MultiAgentOrchestrator()
+    runner._running = True
+    # 旧版本记录没有 failed_node，续跑点只能由已保存的结果推断。
+    old_agent = await fail_task(runner, {**worktree, 'root_cause': '根因'}, '模型未返回可执行的修复方案', None)
+    newer = f'agent-{await runner.submit_task("one")}'
+    with pytest.raises(ValueError, match='其他任务'):
+        await runner.retry_agent(old_agent)
+    await runner.delete_agent(newer)
+    runner.task_queue.get_nowait()
+    result = await runner.retry_agent(old_agent)
+    assert result['mode'] == 'resume' and result['start_node'] == 'design_proposal'
+    async with aiosqlite.connect(task_db) as db:
+        assert await (await db.execute("SELECT status, assigned_agent_id FROM bugs WHERE bug_id='one'")).fetchone() == ('analyzing', old_agent)
+
+
 def test_graph_can_start_from_each_resume_point():
     from src.agent.graph import create_bug_fix_graph, compile_graph
     for node in orchestrator.RESUME_POINTS:

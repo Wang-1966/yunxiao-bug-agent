@@ -176,7 +176,9 @@ const AgentList: React.FC = () => {
           <div className="agent-task-controls">
           {record.status === 'error' && (() => {
             const retrying = !!record.current_bug && retryingBugs.includes(record.current_bug.bug_id);
-            const disabled = retrying || !record.current_bug || record.current_bug.status !== 'failed' || record.current_bug.assigned_agent_id !== record.agent_id || ['已修复', '已关闭', '暂不修复'].includes(record.current_bug.source_status || '');
+            const bug = record.current_bug;
+            const claimable = !!bug && (bug.assigned_agent_id === record.agent_id ? bug.status === 'failed' : !bug.assigned_agent_id && ['pending', 'failed'].includes(bug.status));
+            const disabled = retrying || !claimable || ['已修复', '已关闭', '暂不修复'].includes(bug?.source_status || '');
             return (
               <Space.Compact size="small">
                 <Button size="small" icon={<ReloadOutlined />} loading={retrying} disabled={disabled} title="从失败的阶段继续，复用已有工作树和分析结果" onClick={() => handleRetry(record)}>

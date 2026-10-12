@@ -514,7 +514,9 @@ class MultiAgentOrchestrator:
                 reviewed = await (await db.execute("SELECT 1 FROM decisions WHERE agent_id=? AND stage='verify'", (agent_id,))).fetchone()
             if agent['status'] != 'error' or agent_id in self.running_agents or not history:
                 raise ValueError('只有已失败或已停止的任务可以重新执行')
-            if not bug or bug['assigned_agent_id'] != agent_id or bug['status'] != 'failed' or (bug['source_status'] or '') in ('已修复', '已关闭', '暂不修复'):
+            # Bug 被其他任务删除释放后，原任务可重新认领并续跑。
+            claimable = bug and (bug['assigned_agent_id'] == agent_id and bug['status'] == 'failed' or bug['assigned_agent_id'] is None and bug['status'] in ('pending', 'failed'))
+            if not claimable or (bug['source_status'] or '') in ('已修复', '已关闭', '暂不修复'):
                 raise ValueError('该 Bug 已由其他任务处理或不可修复，请刷新页面')
             saved = json.loads(history['result'] or '{}')
             if reviewed:
@@ -531,8 +533,9 @@ class MultiAgentOrchestrator:
                 async with aiosqlite.connect(db_path) as db:
                     await db.execute('BEGIN IMMEDIATE')
                     cursor = await db.execute(
-                        "UPDATE bugs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE bug_id=? AND assigned_agent_id=? AND status='failed'",
-                        (bug_status, bug['bug_id'], agent_id),
+                        "UPDATE bugs SET status=?, assigned_agent_id=?, updated_at=CURRENT_TIMESTAMP WHERE bug_id=? "
+                        "AND (assigned_agent_id=? AND status='failed' OR assigned_agent_id IS NULL AND status IN ('pending', 'failed'))",
+                        (bug_status, agent_id, bug['bug_id'], agent_id),
                     )
                     if cursor.rowcount != 1:
                         raise ValueError('该 Bug 已由其他任务处理，请刷新页面')

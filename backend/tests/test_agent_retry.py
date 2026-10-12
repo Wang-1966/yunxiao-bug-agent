@@ -82,8 +82,8 @@ async def test_proposal_failure_resumes_same_agent_without_reanalysis(task_db, w
     assert statuses[0].status == 'awaiting_plan_confirmation'
     assert statuses[0].root_cause == '已确认根因'
     assert statuses[0].worktree_path == worktree['worktree_path']
-    prompt = client.ainvoke.call_args.args[0][0]['content']
-    assert '已确认根因' in prompt and '模型未返回可执行的修复方案' in prompt
+    user_messages = [message['content'] for message in client.ainvoke.call_args.args[0] if message['role'] == 'user']
+    assert any('已确认根因' in content and '模型未返回可执行的修复方案' in content for content in user_messages)
 
 
 @pytest.mark.asyncio

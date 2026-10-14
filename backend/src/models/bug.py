@@ -54,3 +54,10 @@ class BugListResponse(BaseModel):
     items: list[Bug]
     page: int = 1
     page_size: int = 20
+
+
+class BugSupplementUpdate(BaseModel):
+    notes: str = Field(default='', max_length=12000)
+    images: list[str] = Field(default_factory=list, max_length=4)
+    revision: int = Field(..., ge=0)
+    document: Optional[dict] = None

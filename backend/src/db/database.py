@@ -43,11 +43,21 @@ async def init_db():
 
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(sql_script)
+        supplement_columns = {row[1] for row in await (await db.execute('PRAGMA table_info(bug_supplements)')).fetchall()}
+        if 'document' not in supplement_columns:
+            await db.execute('ALTER TABLE bug_supplements ADD COLUMN document TEXT')
         cursor = await db.execute("PRAGMA table_info(bugs)")
         columns = {row[1] for row in await cursor.fetchall()}
         for column in ("source_status", "source_project", "source_project_id", "test_command"):
             if column not in columns:
                 await db.execute(f"ALTER TABLE bugs ADD COLUMN {column} TEXT")
+        project_columns = {row[1] for row in await (await db.execute('PRAGMA table_info(projects)')).fetchall()}
+        if 'preview_command' not in project_columns:
+            await db.execute("ALTER TABLE projects ADD COLUMN preview_command TEXT NOT NULL DEFAULT ''")
+        if 'preview_env_files' not in project_columns:
+            await db.execute("ALTER TABLE projects ADD COLUMN preview_env_files TEXT NOT NULL DEFAULT '[]'")
+        if 'preview_port' not in project_columns:
+            await db.execute('ALTER TABLE projects ADD COLUMN preview_port INTEGER')
         from ..core.projects import project_id_from_url
         cursor = await db.execute("SELECT bug_id, source_url FROM bugs WHERE source='yunxiao' AND source_project_id IS NULL")
         for bug_id, url in await cursor.fetchall():

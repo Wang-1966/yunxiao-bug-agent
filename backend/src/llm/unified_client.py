@@ -2,11 +2,16 @@
 from openai import AsyncOpenAI
 from typing import AsyncIterator, List, Dict, Any, Optional
 from loguru import logger
+import httpx
 import json
 import time
 
 from ..models.llm_config import LLMProvider
 from .diagnostics import response_summary
+
+# SDK 默认 connect=5s。握手超过 5 秒会抛出 Request timed out，并中断整次任务。
+# 读超时保持 600 秒，由调用方的 120 秒上限负责取消长时间无输出的请求。
+LLM_TIMEOUT = httpx.Timeout(600.0, connect=30.0)
 
 
 class UnifiedLLMClient:
@@ -17,6 +22,7 @@ class UnifiedLLMClient:
         self.client = AsyncOpenAI(
             api_key=provider.api_key,
             base_url=provider.base_url,
+            timeout=LLM_TIMEOUT,
         )
 
     async def ainvoke(
@@ -28,6 +34,7 @@ class UnifiedLLMClient:
         on_chunk=None,
         on_response=None,
         log_context=None,
+        on_reasoning=None,
         **kwargs
     ) -> str:
         """
@@ -45,7 +52,7 @@ class UnifiedLLMClient:
         """
         chunks, diagnostics = [], {}
         try:
-            async for chunk in self.astream(messages, model, temperature, max_tokens, diagnostics=diagnostics, log_context=log_context, **kwargs):
+            async for chunk in self.astream(messages, model, temperature, max_tokens, diagnostics=diagnostics, log_context=log_context, on_reasoning=on_reasoning, **kwargs):
                 chunks.append(chunk)
                 if on_chunk:
                     await on_chunk(chunk)
@@ -69,6 +76,7 @@ class UnifiedLLMClient:
         max_tokens: int = 8000,
         diagnostics=None,
         log_context=None,
+        on_reasoning=None,
         **kwargs,
     ) -> AsyncIterator[str]:
         """以 OpenAI 兼容的 SSE 流读取文本片段；调用方可自行累积成 JSON。"""
@@ -96,7 +104,12 @@ class UnifiedLLMClient:
                 if delta:
                     values = delta.model_dump(exclude_none=True) if hasattr(delta, 'model_dump') else vars(delta)
                     delta_fields.update(key for key, value in values.items() if value is not None)
-                    diagnostics['reasoning_chars'] += len(getattr(delta, 'reasoning_content', None) or '')
+                    # DeepSeek/Grok 中转使用 reasoning_content，OpenRouter 使用 reasoning。
+                    reasoning = getattr(delta, 'reasoning_content', None) or getattr(delta, 'reasoning', None) or values.get('reasoning_content') or values.get('reasoning')
+                    if isinstance(reasoning, str) and reasoning:
+                        diagnostics['reasoning_chars'] += len(reasoning)
+                        if on_reasoning:
+                            await on_reasoning(reasoning)
                 reason = getattr(chunk.choices[0], 'finish_reason', None) if chunk.choices else None
                 if reason:
                     diagnostics['finish_reasons'].append(reason)

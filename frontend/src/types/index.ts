@@ -50,7 +50,24 @@ export interface AgentStatus {
   fix_summary?: string;
   error?: string;
   test_results?: { passed?: boolean; command?: string; exit_code?: number; output?: string };
-  confirmation?: { decision_id: string; status: string; user_choice?: { confirmed: boolean; feedback: string; merge?: { cleanup_pending?: boolean; cleanup_error?: string } }; answered_at?: string };
+  confirmation?: { decision_id: string; status: string; user_choice?: { confirmed: boolean; feedback: string; images?: string[]; merge?: { cleanup_pending?: boolean; cleanup_error?: string }; yunxiao_sync?: { status: 'pending' | 'succeeded' | 'failed'; target: string; error?: string } }; answered_at?: string };
+}
+
+export interface AgentTranscriptEntry {
+  id: number;
+  level: 'thinking' | 'assistant' | 'info' | 'warning' | 'error' | string;
+  message: string;
+  metadata?: { label?: string; duration_ms?: number } | null;
+  created_at: string;
+}
+
+export interface AgentLiveStream {
+  label: string;
+  thinking: string;
+  content: string;
+  content_chars: number;
+  elapsed_ms: number;
+  thinking_ms: number;
 }
 
 export interface LLMProvider {
@@ -98,6 +115,29 @@ export interface WebSocketMessage {
 export interface TaskSubmitRequest {
   bug_id: string;
   priority: number;
+  supplement_revision?: number;
+}
+
+export interface BugSupplement {
+  notes: string;
+  images: string[];
+  revision: number;
+  image_warning?: string;
+  document?: RichInputNode;
+}
+
+export interface RichInputNode {
+  type: string;
+  text?: string;
+  attrs?: { image_index?: number; start?: number };
+  marks?: { type: string }[];
+  content?: RichInputNode[];
+}
+
+export interface RichInputValue {
+  text: string;
+  images: string[];
+  document?: RichInputNode;
 }
 
 export interface Decision {

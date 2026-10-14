@@ -39,12 +39,16 @@ class AgentStatus(BaseModel):
 class RepairConfirmation(BaseModel):
     confirmed: StrictBool
     feedback: str = Field(default='', max_length=4000)
+    images: list[str] = Field(default_factory=list, max_length=4)
+    document: Optional[dict] = None
     git_commit_hash: Optional[str] = Field(default=None, pattern=r'^[0-9a-f]{40,64}$')
 
 
 class ProposalConfirmation(BaseModel):
     proposal_index: int = Field(..., ge=0)
     feedback: str = Field(default='', max_length=4000)
+    images: list[str] = Field(default_factory=list, max_length=4)
+    document: Optional[dict] = None
     decision_id: Optional[str] = None
 
 
@@ -52,6 +56,7 @@ class TaskSubmitRequest(BaseModel):
     """提交任务请求"""
     bug_id: str = Field(..., description="Bug ID")
     priority: int = Field(default=0, description="优先级，数字越大越优先")
+    supplement_revision: Optional[int] = Field(default=None, ge=0)
 
 
 class TaskSubmitResponse(BaseModel):

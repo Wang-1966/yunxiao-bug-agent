@@ -1,4 +1,15 @@
 import api from './api';
+import type { AgentLiveStream, AgentTranscriptEntry, RichInputNode } from '../types';
+
+export interface PreviewStatus {
+  status: 'stopped' | 'starting' | 'running' | 'failed';
+  url: string | null;
+  port?: number;
+  mode?: 'fixed' | 'direct';
+  git_commit_hash?: string;
+  output: string;
+  error: string;
+}
 
 export const agentService = {
   // 获取所有 Agent 状态
@@ -18,9 +29,25 @@ export const agentService = {
     return response.data as { diff: string; truncated: boolean };
   },
 
-  async confirm(agentId: string, confirmed: boolean, feedback: string, gitCommitHash?: string) {
-    const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/confirmation`, { confirmed, feedback, git_commit_hash: gitCommitHash });
+  async preview(agentId: string) {
+    return (await api.post(`/api/agents/${encodeURIComponent(agentId)}/preview`)).data as PreviewStatus;
+  },
+
+  async previewStatus(agentId: string) {
+    return (await api.get(`/api/agents/${encodeURIComponent(agentId)}/preview`)).data as PreviewStatus;
+  },
+
+  async stopPreview(agentId: string) {
+    return (await api.delete(`/api/agents/${encodeURIComponent(agentId)}/preview`)).data as PreviewStatus;
+  },
+
+  async confirm(agentId: string, confirmed: boolean, feedback: string, gitCommitHash?: string, images: string[] = [], document?: RichInputNode) {
+    const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/confirmation`, { confirmed, feedback, images, document, git_commit_hash: gitCommitHash });
     return response.data;
+  },
+
+  async retryYunxiaoStatusSync(agentId: string) {
+    return (await api.post(`/api/agents/${encodeURIComponent(agentId)}/yunxiao-status-sync`)).data;
   },
 
   async proposal(agentId: string) {
@@ -28,9 +55,14 @@ export const agentService = {
     return response.data;
   },
 
-  async confirmProposal(agentId: string, proposalIndex: number, feedback: string, decisionId?: string) {
-    const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/proposal-confirmation`, { proposal_index: proposalIndex, feedback, decision_id: decisionId });
+  async confirmProposal(agentId: string, proposalIndex: number, feedback: string, decisionId?: string, images: string[] = [], document?: RichInputNode) {
+    const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/proposal-confirmation`, { proposal_index: proposalIndex, feedback, images, document, decision_id: decisionId });
     return response.data;
+  },
+
+  async transcript(agentId: string, after = 0) {
+    const response = await api.get(`/api/agents/${encodeURIComponent(agentId)}/transcript`, { params: { after } });
+    return response.data as { entries: AgentTranscriptEntry[]; live: AgentLiveStream | null };
   },
 
   async retry(agentId: string) {

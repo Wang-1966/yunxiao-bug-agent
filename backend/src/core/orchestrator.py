@@ -1,21 +1,58 @@
 """多 Agent 协调器"""
 import asyncio
 import json
+import random
 import uuid
 import aiosqlite
 from itertools import count
 from pathlib import Path
 from typing import Dict, Optional, List
 from loguru import logger
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..agent.graph import create_bug_fix_graph, compile_graph
 from ..agent.state import BugFixState
 from ..config import get_settings
 from .projects import resolve_project_config
+from .repair_merge import discard_worktree
+from .bug_inputs import read_supplement
 
 settings = get_settings()
+
+AGENT_NICKNAMES = (
+    "夜猫子修修",
+    "咖啡因大夫",
+    "通宵啄木鸟",
+    "爱较真的补丁匠",
+    "戴眼镜的捉虫侠",
+    "零警告强迫症",
+    "断点旅行者",
+    "日志考古家",
+)
+
+
+def pick_agent_name(taken: set[str]) -> str:
+    free = [name for name in AGENT_NICKNAMES if name not in taken]
+    if free:
+        return random.choice(free)
+    base = random.choice(AGENT_NICKNAMES)
+    number = 2
+    while f"{base} {number}" in taken:
+        number += 1
+    return f"{base} {number}"
+
+
+async def rename_stiff_agent_names(db):
+    rows = await (await db.execute("SELECT agent_id, name FROM agents")).fetchall()
+    taken = {name for _, name in rows if not name.startswith("修复 Agent task-")}
+    for agent_id, name in rows:
+        if not name.startswith("修复 Agent task-"):
+            continue
+        nickname = pick_agent_name(taken)
+        taken.add(nickname)
+        await db.execute("UPDATE agents SET name=? WHERE agent_id=?", (nickname, agent_id))
+
 
 STAGE_PROGRESS = {"analyzing": 10, "proposing": 30, "awaiting_plan_confirmation": 35, "fixing": 50, "verifying": 75, "awaiting_confirmation": 90, "completed": 90}
 # 续跑起点 -> (阶段, Bug 状态, 进度, 页面说明)
@@ -38,6 +75,7 @@ class Task:
     status: str = "pending"  # pending, running, completed, failed
     start_node: str = "fetch_bug"
     resume_state: Optional[dict] = None
+    input_snapshot: dict = field(default_factory=dict)
 
 
 class MultiAgentOrchestrator:
@@ -66,6 +104,7 @@ class MultiAgentOrchestrator:
             await db.execute('BEGIN IMMEDIATE')
             # 合并已开始但进程中断时，允许再次验收；提交祖先检查避免重复合并。
             await db.execute("UPDATE decisions SET status='pending' WHERE stage='verify' AND status='delivering'")
+            await rename_stiff_agent_names(db)
             cursor = await db.execute("SELECT agent_id, current_bug_id FROM agents WHERE status IN ('busy', 'paused')")
             for agent_id, bug_id in await cursor.fetchall():
                 await db.execute("UPDATE agents SET status='error', updated_at=CURRENT_TIMESTAMP WHERE agent_id=?", (agent_id,))
@@ -106,7 +145,7 @@ class MultiAgentOrchestrator:
             await self._save_status(f"agent-{queued.task_id}", queued, "error", "failed", "服务停止，排队任务已取消")
         logger.info("Orchestrator stopped")
 
-    async def submit_task(self, bug_id: str, priority: int = 0) -> str:
+    async def submit_task(self, bug_id: str, priority: int = 0, *, supplement_revision: Optional[int] = None) -> str:
         """
         提交修复任务
 
@@ -141,20 +180,25 @@ class MultiAgentOrchestrator:
             )
             if cursor.rowcount != 1:
                 raise ValueError("该 Bug 不可修复或已有排队/运行任务，请勿重复提交")
+            supplement = await read_supplement(db, bug_id)
+            if supplement_revision is not None and supplement['revision'] != supplement_revision:
+                raise ValueError('补充信息已更新，请重新加载后再开始修复')
+            task.input_snapshot = {'supplement': supplement}
+            taken = {row[0] for row in await (await db.execute("SELECT name FROM agents")).fetchall()}
             await db.execute(
                 "INSERT INTO agents (agent_id, name, status, current_bug_id) VALUES (?, ?, 'busy', ?)",
-                (agent_id, f"修复 Agent {task_id}", bug_id),
+                (agent_id, pick_agent_name(taken), bug_id),
             )
             await db.execute(
                 "INSERT INTO agent_logs (agent_id, bug_id, log_level, message) VALUES (?, ?, 'info', '任务已入队，等待执行')",
                 (agent_id, bug_id),
             )
             await db.execute(
-                "INSERT INTO task_history (task_id, bug_id, agent_id, stage, status, result) VALUES (?, ?, ?, 'queued', 'running', '{}')",
-                (task_id, bug_id, agent_id),
+                "INSERT INTO task_history (task_id, bug_id, agent_id, stage, status, result) VALUES (?, ?, ?, 'queued', 'running', ?)",
+                (task_id, bug_id, agent_id, json.dumps({'input_snapshot': task.input_snapshot}, ensure_ascii=False)),
             )
             await db.commit()
-        self.agent_states[agent_id] = {"task": task, "state": {"stage": "queued"}, "status": "queued", "progress": 0}
+        self.agent_states[agent_id] = {"task": task, "state": {"stage": "queued", "input_snapshot": task.input_snapshot}, "status": "queued", "progress": 0}
         # 同优先级按提交顺序排列，避免比较不可排序的 Task 对象。
         self.task_queue.put_nowait((-priority, next(self._sequence), task))
 
@@ -234,6 +278,7 @@ class MultiAgentOrchestrator:
             initial_state: BugFixState = {
                 "bug_id": task.bug_id,
                 "bug_info": {},
+                "input_snapshot": task.input_snapshot,
                 "stage": "idle",
                 "root_cause": None,
                 "confidence": "medium",
@@ -249,7 +294,9 @@ class MultiAgentOrchestrator:
                 "error": None,
             }
             from .repair_review import latest_repair_feedback
+            from .repair_attempts import latest_rejected_attempt
             initial_state['repair_feedback'] = await latest_repair_feedback(settings.database_url.replace('sqlite+aiosqlite:///', ''), task.bug_id)
+            initial_state['previous_attempt'] = await latest_rejected_attempt(settings.database_url.replace('sqlite+aiosqlite:///', ''), task.bug_id)
             initial_state['require_plan_confirmation'] = True
             # Project binding is authoritative for repository and target branch.
             from ..core.projects import resolve_project_config
@@ -340,10 +387,11 @@ class MultiAgentOrchestrator:
             await db.execute("UPDATE bugs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE bug_id=? AND assigned_agent_id=?", (bug_status, task.bug_id, agent_id))
             runtime = self.agent_states.get(agent_id, {})
             state = runtime.get('state', {})
-            # 只保存审查需要的信息，避免把签名 URL、截图数据或整份 Bug 正文写入结果。
-            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'proposals', 'selected_proposal', 'fix_summary', 'modified_files', 'test_results', 'error', 'failed_node', 'repair_feedback') if key in state}
+            # 输入快照保留原始正文和图片文件引用，不持久化图片 base64 或临时签名地址。
+            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'proposals', 'selected_proposal', 'fix_summary', 'modified_files', 'test_results', 'error', 'failed_node', 'repair_feedback', 'previous_attempt') if key in state}
             result['progress'] = runtime.get('progress', 0)
-            # 只持久化文字观察和正文指纹；原图由详情加载链路在恢复时重新取得。
+            result['input_snapshot'] = state.get('input_snapshot', task.input_snapshot)
+            # 文字观察和正文指纹单独保存；续跑按快照文件引用读取原图。
             result['visual_context'] = state.get('visual_context')
             result['source_context'] = state.get('source_context')
             stage = 'failed' if agent_status == 'error' else state.get('stage', 'queued')
@@ -368,11 +416,13 @@ class MultiAgentOrchestrator:
             )
             await db.commit()
 
-    async def confirm_proposal(self, agent_id: str, proposal_index: int, feedback: str = '', decision_id: str = None):
-        """有反馈则重新分析并等待确认；无反馈才实施当前方案。"""
-        feedback = feedback.strip()
-        stage = 'analyzing' if feedback else 'fixing'
+    async def confirm_proposal(self, agent_id: str, proposal_index: int, feedback: str = '', decision_id: str = None, images: list = None, document: dict = None):
+        """有文字或截图反馈则重新分析并等待确认；无反馈才实施当前方案。"""
+        from .rich_input import save_rich_input
         db_path = settings.database_url.replace('sqlite+aiosqlite:///', '')
+        feedback, image_names, document = save_rich_input(db_path, feedback, images or [], document, max_length=4000)
+        has_feedback = bool(feedback or image_names)
+        stage = 'analyzing' if has_feedback else 'fixing'
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute('BEGIN IMMEDIATE')
@@ -390,7 +440,9 @@ class MultiAgentOrchestrator:
                 raise ValueError('选择的修复方案不存在')
             if not saved.get('worktree_path'):
                 raise ValueError('修复工作树记录缺失，请重新执行任务')
-            choice = {'proposal_index': proposal_index, 'feedback': feedback, 'proposal': proposals[proposal_index]}
+            choice = {'proposal_index': proposal_index, 'feedback': feedback, 'images': image_names, 'proposal': proposals[proposal_index]}
+            if document is not None:
+                choice['document'] = document
             if feedback:
                 saved['repair_feedback'] = '\n\n'.join(filter(None, [saved.get('repair_feedback'), feedback]))
             await db.execute("UPDATE decisions SET status='answered', user_choice=?, answered_at=CURRENT_TIMESTAMP WHERE decision_id=?", (json.dumps(choice, ensure_ascii=False), decision['decision_id']))
@@ -400,13 +452,13 @@ class MultiAgentOrchestrator:
             await db.commit()
         task = Task(task_id=history['task_id'], bug_id=bug['bug_id'], priority=0, created_at=datetime.now(), status='running')
         state = {**saved, 'bug_id': task.bug_id, 'bug_info': {}, 'stage': stage,
-                 'root_cause': None if feedback else saved.get('root_cause'),
-                 'proposals': [] if feedback else proposals,
-                 'selected_proposal': None if feedback else proposals[proposal_index],
+                 'root_cause': None if has_feedback else saved.get('root_cause'),
+                 'proposals': [] if has_feedback else proposals,
+                 'selected_proposal': None if has_feedback else proposals[proposal_index],
                  'modified_files': [], 'test_results': {}, 'waiting_for_user': False,
                  'user_decision': choice, 'error': None, 'require_plan_confirmation': True}
-        self.agent_states[agent_id] = {'agent_id': agent_id, 'task': task, 'state': state, 'status': 'running', 'progress': 10 if feedback else 45}
-        task_handle = asyncio.create_task(self._resume_proposal(agent_id, task, state, bool(feedback)))
+        self.agent_states[agent_id] = {'agent_id': agent_id, 'task': task, 'state': state, 'status': 'running', 'progress': 10 if has_feedback else 45}
+        task_handle = asyncio.create_task(self._resume_proposal(agent_id, task, state, has_feedback))
         self.running_agents[agent_id] = task_handle
         task_handle.add_done_callback(lambda t: self._on_agent_complete(agent_id, t))
         return {'agent_id': agent_id, 'status': stage}
@@ -423,6 +475,7 @@ class MultiAgentOrchestrator:
             if result.get('error'):
                 raise RuntimeError(result['error'])
             state['bug_info'] = result['bug_info']
+            state['input_snapshot'] = result.get('input_snapshot', state.get('input_snapshot', task.input_snapshot))
             async with aiosqlite.connect(settings.database_url.replace('sqlite+aiosqlite:///', '')) as db:
                 db.row_factory = aiosqlite.Row
                 row = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (task.bug_id,))).fetchone()
@@ -512,6 +565,7 @@ class MultiAgentOrchestrator:
                 history = await (await db.execute('SELECT * FROM task_history WHERE agent_id=? ORDER BY id DESC LIMIT 1', (agent_id,))).fetchone()
                 bug = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (agent['current_bug_id'],))).fetchone()
                 reviewed = await (await db.execute("SELECT 1 FROM decisions WHERE agent_id=? AND stage='verify'", (agent_id,))).fetchone()
+                supplement = await read_supplement(db, agent['current_bug_id'])
             if agent['status'] != 'error' or agent_id in self.running_agents or not history:
                 raise ValueError('只有已失败或已停止的任务可以重新执行')
             # Bug 被其他任务删除释放后，原任务可重新认领并续跑。
@@ -519,7 +573,10 @@ class MultiAgentOrchestrator:
             if not claimable or (bug['source_status'] or '') in ('已修复', '已关闭', '暂不修复'):
                 raise ValueError('该 Bug 已由其他任务处理或不可修复，请刷新页面')
             saved = json.loads(history['result'] or '{}')
-            if reviewed:
+            previous_supplement = saved.get('input_snapshot', {}).get('supplement', {'notes': '', 'image_names': [], 'revision': 0})
+            if supplement != previous_supplement:
+                start_node, reason = None, '补充修复信息已更新，需要重新分析根因'
+            elif reviewed:
                 start_node, reason = None, '上次修复已提交验收'
             else:
                 start_node, reason = await self._resume_point(saved)
@@ -547,7 +604,8 @@ class MultiAgentOrchestrator:
             task_id = await self.submit_task(bug_id, priority)
             return {'agent_id': f'agent-{task_id}', 'task_id': task_id, 'mode': 'restart', 'reason': reason}
 
-        task = Task(task_id=history['task_id'], bug_id=bug['bug_id'], priority=priority, created_at=datetime.now(), start_node=start_node)
+        task = Task(task_id=history['task_id'], bug_id=bug['bug_id'], priority=priority, created_at=datetime.now(), start_node=start_node,
+                    input_snapshot=saved.get('input_snapshot') or {'supplement': supplement})
         if start_node != 'fetch_bug':
             cleared = {
                 'analyze_root_cause': {'root_cause': None, 'proposals': [], 'selected_proposal': None, 'modified_files': []},
@@ -623,10 +681,16 @@ class MultiAgentOrchestrator:
         # 删除不能穿插在交付或清理的数据库事务之间。
         async with self._agent_control_lock, _delivery_lock:
             await self._stop_agent(agent_id)
+            from .preview_manager import stop_preview
+            await stop_preview(agent_id, forget=True)
             db_path = settings.database_url.replace("sqlite+aiosqlite:///", "")
             async with aiosqlite.connect(db_path) as db:
                 await db.execute("PRAGMA foreign_keys=ON")
                 await db.execute("BEGIN IMMEDIATE")
+                row = await (await db.execute('''SELECT a.worktree_path, h.result FROM agents a
+                    LEFT JOIN task_history h ON h.id=(SELECT MAX(id) FROM task_history WHERE agent_id=a.agent_id)
+                    WHERE a.agent_id=?''', (agent_id,))).fetchone()
+                saved = json.loads(row[1] or '{}') if row else {}
                 await db.execute(
                     "UPDATE bugs SET assigned_agent_id=NULL, "
                     "status=CASE WHEN status IN ('analyzing', 'fixing', 'testing', 'awaiting_plan_confirmation', 'awaiting_confirmation') THEN 'failed' ELSE status END, "
@@ -637,7 +701,13 @@ class MultiAgentOrchestrator:
                     await db.execute(f"DELETE FROM {table} WHERE agent_id=?", (agent_id,))
                 await db.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
                 await db.commit()
-            self.agent_states.pop(agent_id, None)
+            state = self.agent_states.pop(agent_id, None) or {}
+            worktree = (row and row[0]) or state.get("state", {}).get("worktree_path")
+            if worktree:
+                try:
+                    await discard_worktree(worktree, saved.get('repair_branch') or state.get('state', {}).get('repair_branch'))
+                except (ValueError, OSError) as exc:
+                    logger.warning(f"Agent {agent_id} 已删除，工作树未清理（下次启动会重试）：{exc}")
 
     def _on_agent_complete(self, agent_id: str, task: asyncio.Task):
         """

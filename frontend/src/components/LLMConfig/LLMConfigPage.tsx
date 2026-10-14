@@ -11,12 +11,33 @@ import {
   Table,
   Tag,
   Tabs,
+  Modal,
+  Popconfirm,
+  AutoComplete,
+  Tooltip,
 } from 'antd';
-import { CheckCircleOutlined, SaveOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons';
 import { llmConfigService } from '../../services/llmConfigService';
 import type { LLMConfig, LLMProvider, YunxiaoConfig } from '../../types';
 
 const { Option } = Select;
+
+function errorDetail(error: unknown, fallback: string) {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  return typeof detail === 'string' ? detail : fallback;
+}
+
+function createProviderId(name: string, existing: string[]) {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const base = slug || 'provider';
+  let id = base;
+  let index = 2;
+  while (existing.includes(id)) {
+    id = `${base}-${index}`;
+    index += 1;
+  }
+  return id;
+}
 
 const LLMConfigPage: React.FC = () => {
   const [config, setConfig] = useState<LLMConfig | null>(null);
@@ -27,6 +48,12 @@ const LLMConfigPage: React.FC = () => {
   const [form] = Form.useForm();
   const [yunxiaoForm] = Form.useForm();
   const [promptForm] = Form.useForm();
+  const [providerForm] = Form.useForm();
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<LLMProvider | null>(null);
+  const [savingProvider, setSavingProvider] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
 
   useEffect(() => {
     loadConfig();
@@ -66,16 +93,131 @@ const LLMConfigPage: React.FC = () => {
   };
 
   const handleSave = async (values: any) => {
+    const { providers: _providers, ...rest } = values;
     setLoading(true);
     try {
-      const updated = await llmConfigService.update(values);
+      const updated = await llmConfigService.update(rest);
       setConfig(updated);
       message.success('配置保存成功');
     } catch (error) {
-      message.error('保存配置失败');
-      console.error(error);
+      message.error(errorDetail(error, '保存配置失败'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const persistProviders = async (providers: LLMProvider[], defaults?: { default_provider: string; default_model: string }) => {
+    const updated = await llmConfigService.update({ providers, ...defaults });
+    setConfig(updated);
+    if (defaults) form.setFieldsValue(defaults);
+    return updated;
+  };
+
+  const fetchProviderModels = async () => {
+    const baseUrl = String(providerForm.getFieldValue('base_url') || '').trim();
+    if (!baseUrl) {
+      message.error('请先填写 Base URL');
+      return;
+    }
+    setFetchingModels(true);
+    try {
+      const models = await llmConfigService.fetchModels({
+        provider_id: editingProvider?.id,
+        base_url: baseUrl,
+        api_key: providerForm.getFieldValue('api_key'),
+      });
+      const current = providerForm.getFieldValue('default_model')?.trim();
+      setModelOptions(models);
+      providerForm.setFieldsValue({
+        available_models: models,
+        default_model: current && models.includes(current) ? current : models[0],
+      });
+      message.success(`已获取 ${models.length} 个模型`);
+    } catch (error) {
+      message.error(errorDetail(error, '获取模型列表失败'));
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const openProviderEditor = (provider: LLMProvider | null) => {
+    setEditingProvider(provider);
+    setModelOptions(provider?.available_models || []);
+    providerForm.resetFields();
+    providerForm.setFieldsValue(provider ? {
+      name: provider.name,
+      base_url: provider.base_url,
+      default_model: provider.default_model,
+      available_models: provider.available_models,
+      enabled: provider.enabled,
+    } : { enabled: true });
+    setEditorOpen(true);
+  };
+
+  const saveProvider = async (values: {
+    name: string;
+    base_url: string;
+    api_key?: string;
+    default_model: string;
+    available_models?: string[];
+    enabled?: boolean;
+  }) => {
+    if (!config) return;
+    const apiKey = values.api_key?.trim() || '';
+    if (!editingProvider && !apiKey) {
+      message.error('请输入 API Key');
+      return;
+    }
+    const defaultModel = values.default_model.trim();
+    const models = [...new Set([...(values.available_models || []).map((model) => model.trim()).filter(Boolean), defaultModel])];
+    const provider: LLMProvider = {
+      id: editingProvider?.id || createProviderId(values.name, config.providers.map((item) => item.id)),
+      name: values.name.trim(),
+      type: 'openai-compatible',
+      base_url: values.base_url.trim(),
+      api_key: apiKey,
+      available_models: models,
+      default_model: defaultModel,
+      enabled: values.enabled ?? true,
+    };
+    const providers = editingProvider
+      ? config.providers.map((item) => (item.id === editingProvider.id ? provider : item))
+      : [...config.providers, provider];
+    setSavingProvider(true);
+    try {
+      const defaults = config.default_provider ? undefined : {
+        default_provider: provider.id,
+        default_model: provider.default_model,
+      };
+      await persistProviders(providers, defaults);
+      message.success(editingProvider ? '提供商已更新' : '提供商已添加');
+      setEditorOpen(false);
+    } catch (error) {
+      message.error(errorDetail(error, '保存提供商失败'));
+    } finally {
+      setSavingProvider(false);
+    }
+  };
+
+  const removeProvider = async (provider: LLMProvider) => {
+    if (!config) return;
+    if (config.default_provider === provider.id) {
+      message.error('该提供商是默认提供商，请先修改默认配置');
+      return;
+    }
+    const usedStage = Object.entries(config.stage_config || {}).find(([, stage]) => stage.provider === provider.id);
+    if (usedStage) {
+      message.error(`该提供商仍被 ${usedStage[0]} 阶段使用，请先修改阶段配置`);
+      return;
+    }
+    setSavingProvider(true);
+    try {
+      await persistProviders(config.providers.filter((item) => item.id !== provider.id));
+      message.success('提供商已删除');
+    } catch (error) {
+      message.error(errorDetail(error, '删除提供商失败'));
+    } finally {
+      setSavingProvider(false);
     }
   };
 
@@ -127,14 +269,29 @@ const LLMConfigPage: React.FC = () => {
       title: '操作',
       key: 'action',
       render: (_: any, record: LLMProvider) => (
-        <Button
-          size="small"
-          icon={<CheckCircleOutlined />}
-          loading={testingProvider === record.id}
-          onClick={() => handleTestConnection(record)}
-        >
-          测试连接
-        </Button>
+        <Space size={4} wrap>
+          <Button size="small" icon={<EditOutlined />} onClick={() => openProviderEditor(record)}>
+            编辑
+          </Button>
+          <Button
+            size="small"
+            icon={<CheckCircleOutlined />}
+            loading={testingProvider === record.id}
+            onClick={() => handleTestConnection(record)}
+          >
+            测试连接
+          </Button>
+          <Popconfirm
+            title="删除该提供商？"
+            description="删除后需要重新添加才能使用。"
+            onConfirm={() => removeProvider(record)}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
@@ -145,7 +302,6 @@ const LLMConfigPage: React.FC = () => {
         defaultActiveKey="llm"
         renderTabBar={(props, DefaultTabBar) => (
           <div className="settings-sticky-header">
-            <div className="page-heading"><div><div className="page-eyebrow">WORKSPACE SETTINGS</div><h1>通用配置</h1></div></div>
             <DefaultTabBar {...props} />
           </div>
         )}
@@ -155,9 +311,16 @@ const LLMConfigPage: React.FC = () => {
           children: <>
 
       <section className="data-section">
-        <div className="section-heading"><h2>提供商列表</h2><span>{config?.providers.length || 0} 个提供商</span></div>
+        <div className="section-heading">
+          <h2>提供商列表</h2>
+          <Space>
+            <span>{config?.providers.length || 0} 个提供商</span>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => openProviderEditor(null)}>添加提供商</Button>
+          </Space>
+        </div>
         <Table
-          scroll={{ x: 680 }}
+          scroll={{ x: 860 }}
+          locale={{ emptyText: '还没有提供商，点击右上角添加' }}
           columns={providerColumns}
           dataSource={config?.providers || []}
           rowKey="id"
@@ -268,6 +431,54 @@ const LLMConfigPage: React.FC = () => {
           </Button>
         </Form.Item>
       </Form>
+      <Modal
+        title={editingProvider ? '编辑提供商' : '添加提供商'}
+        open={editorOpen}
+        onCancel={() => !savingProvider && setEditorOpen(false)}
+        onOk={() => providerForm.submit()}
+        confirmLoading={savingProvider}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={providerForm} layout="vertical" onFinish={saveProvider}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, whitespace: true, message: '请输入名称' }]}>
+            <Input placeholder="例如 Claude 中转" />
+          </Form.Item>
+          <Form.Item name="base_url" label="Base URL" rules={[{ required: true, whitespace: true, message: '请输入 Base URL' }, { pattern: /^https?:\/\/\S+$/, message: '请输入以 http:// 或 https:// 开头的地址' }]}>
+            <Input placeholder="https://api.example.com/v1" />
+          </Form.Item>
+          <Form.Item
+            name="api_key"
+            label="API Key"
+            extra={editingProvider ? '留空则保持当前 Key 不变' : undefined}
+            rules={[{ required: !editingProvider, whitespace: true, message: '请输入 API Key' }]}
+          >
+            <Input.Password placeholder={editingProvider ? '已配置，留空保持不变' : '请输入 API Key'} autoComplete="new-password" />
+          </Form.Item>
+          <Form.Item label="默认模型" required extra="点击右侧按钮从提供商获取模型列表，也可以手动输入。">
+            <Space.Compact style={{ width: '100%' }}>
+              <Form.Item name="default_model" noStyle rules={[{ required: true, whitespace: true, message: '请输入默认模型' }]}>
+                <AutoComplete
+                  style={{ width: '100%' }}
+                  placeholder="例如 gpt-4.1"
+                  options={modelOptions.map((model) => ({ value: model }))}
+                  filterOption={(input, option) => String(option?.value).toLowerCase().includes(input.toLowerCase())}
+                />
+              </Form.Item>
+              <Tooltip title="获取模型列表">
+                <Button aria-label="获取模型列表" icon={<DownloadOutlined />} loading={fetchingModels} onClick={fetchProviderModels} />
+              </Tooltip>
+            </Space.Compact>
+          </Form.Item>
+          <Form.Item name="available_models" label="可用模型" extra="获取模型列表后会自动填入，也可输入模型名后回车。默认模型会自动加入。">
+            <Select mode="tags" placeholder="可添加多个模型" tokenSeparators={[',']} options={modelOptions.map((model) => ({ value: model }))} />
+          </Form.Item>
+          <Form.Item name="enabled" label="启用" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
           </>,
         }, {
           key: 'prompts',

@@ -53,6 +53,8 @@ async def test_response_style_reaches_analysis_proposal_and_fix(style, label, tm
         'bug_id': 'one', 'worktree_path': str(tmp_path),
         'bug_info': {'title': '新增异常', 'description': '输入包含 $title 和 {value}', 'agent_images': []},
         'repair_feedback': '保留编辑行为',
+        'previous_attempt': {'round': 1, 'root_cause': '旧根因', 'selected_proposal': {'name': '旧方案'}, 'diff_stat': ' a.vue | 2 +- $x',
+                             'modified_files': ['a.vue'], 'feedback': '点击后仍报错', 'image_count': 1},
     }
     state.update(await nodes.analyze_root_cause_node(state))
     assert state['stage'] == 'proposing'
@@ -68,12 +70,13 @@ async def test_response_style_reaches_analysis_proposal_and_fix(style, label, tm
     assert proposal_messages[0]['role'] == 'system'
     assert 'JSON' in proposal_messages[0]['content']
     assert llm.ainvoke.call_args.kwargs['response_format'] == {'type': 'json_object'}
-    assert llm.ainvoke.call_args.kwargs['log_context'] == f'{tmp_path.name}/propose'
+    assert llm.ainvoke.call_args.kwargs['log_context'] == f'{tmp_path.name}/propose/1'
     prompts = [operation.call_args_list[0].args[2], proposal_messages[-1]['content'], operation.call_args_list[1].args[2]]
     for prompt in prompts:
         assert f'回答风格：{label}' in prompt
         assert '输入包含 $title 和 {value}' in prompt
         assert '保留编辑行为' in prompt
+        assert '已被验收否定的假设）：旧根因' in prompt and 'a.vue | 2 +- $x' in prompt and '点击后仍报错' in prompt
         assert '不降低源码核对、置信度判断、兼容性或验证要求' in prompt
     assert 'form.vue' in prompts[1]
     assert '修正初始化' in prompts[2]
@@ -100,9 +103,26 @@ async def test_invalid_proposal_response_records_diagnostics(tmp_path, monkeypat
     })
 
     assert result['stage'] == 'completed'
-    assert '无效 JSON' in result['error']
+    assert '模型未返回可执行的修复方案' in result['error']
     assert not result.get('waiting_for_user')
+    assert llm.ainvoke.await_count == nodes.MAX_PROPOSAL_ATTEMPTS
     message = operation.await_args.args[1]
     assert f'{tmp_path.name}/propose' in message
     assert 'response_sha256' in message and 'relay' in message and '先给出方案' in message
     assert 'sensitive-token' not in message
+
+
+@pytest.mark.asyncio
+async def test_prose_only_proposal_response_is_retried_with_feedback(tmp_path, monkeypatch):
+    proposal = {'name': '只改展示', 'steps': ['修正日期分组'], 'pros': [], 'cons': [], 'risks': '低'}
+    llm = AsyncMock()
+    llm.ainvoke.side_effect = ['我先核对历史分组的日期计算实现，再据此给出修复方案。', json.dumps({'proposals': [proposal]})]
+    monkeypatch.setattr(LLMFactory, 'create', lambda **kwargs: llm)
+    monkeypatch.setattr(nodes, 'record_source_operation', AsyncMock())
+    result = await nodes.design_proposal_node({
+        'bug_id': 'one', 'worktree_path': str(tmp_path), 'bug_info': {'title': 'bug'}, 'root_cause': 'wrong value',
+    })
+    assert result['proposals'] == [proposal]
+    retry_messages = llm.ainvoke.await_args_list[1].args[0]
+    assert retry_messages[-2] == {'role': 'assistant', 'content': '我先核对历史分组的日期计算实现，再据此给出修复方案。'}
+    assert '没有 JSON 对象' in retry_messages[-1]['content']

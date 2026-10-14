@@ -17,13 +17,34 @@ fi
 # 1. 安装后端依赖
 echo "📦 [1/4] 安装后端依赖..."
 cd backend
-if [ ! -d "venv" ]; then
-    echo "创建虚拟环境..."
-    python3 -m venv venv
+if [ -n "${BACKEND_PYTHON:-}" ]; then
+    if ! "$BACKEND_PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+        echo "❌ BACKEND_PYTHON 必须指向 Python 3.11+"
+        exit 1
+    fi
+else
+    for candidate in python3.11 python3.12 python3.13 python3.14 python3; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+            BACKEND_PYTHON=$(command -v "$candidate")
+            break
+        fi
+    done
+    if [ -z "${BACKEND_PYTHON:-}" ]; then
+        echo "❌ 后端要求 Python 3.11+；请安装后重试，或通过 BACKEND_PYTHON 指定解释器路径"
+        exit 1
+    fi
 fi
 
-source venv/bin/activate
-pip3 install -r requirements.txt
+if [ ! -d "venv" ]; then
+    echo "创建虚拟环境..."
+    "$BACKEND_PYTHON" -m venv venv
+fi
+
+if ! venv/bin/python -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+    echo "❌ backend/venv 无效或 Python 版本低于 3.11；请移走旧环境，再运行此脚本重建"
+    exit 1
+fi
+venv/bin/python -m pip install -r requirements.txt
 echo "✅ 后端依赖安装完成"
 echo ""
 
@@ -41,8 +62,7 @@ echo ""
 # 3. 启动后端
 echo "🚀 [3/4] 启动后端服务..."
 cd ../backend
-source venv/bin/activate
-nohup python3 -m src.main > backend.log 2>&1 &
+nohup venv/bin/python -m src.main > backend.log 2>&1 &
 BACKEND_PID=$!
 echo "✅ 后端服务已启动 (PID: $BACKEND_PID)"
 echo "   日志: backend/backend.log"
@@ -54,10 +74,12 @@ echo "⏳ 等待后端启动..."
 sleep 5
 
 # 检查后端是否启动成功
-if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
+if kill -0 "$BACKEND_PID" 2>/dev/null && curl -fsS http://localhost:8000/health > /dev/null 2>&1; then
     echo "✅ 后端健康检查通过"
 else
-    echo "⚠️  后端可能未完全启动，请检查 backend/backend.log"
+    echo "❌ 后端启动失败，请检查 backend/backend.log"
+    kill "$BACKEND_PID" 2>/dev/null || true
+    exit 1
 fi
 echo ""
 

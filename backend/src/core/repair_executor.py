@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import signal
 import uuid
 import time
@@ -20,6 +21,23 @@ MAX_FINISH_ATTEMPTS = 3
 MAX_BATCH_OPERATIONS = 5
 MAX_CONTEXT_READS = 12
 MAX_CONTEXT_CHARS = 48000
+# 只在接近上限时一次性压缩到目标值，平时历史只追加，保持提示词缓存命中。
+COMPACT_TRIGGER_CHARS = 120_000
+COMPACT_TARGET_CHARS = 60_000
+COMPACT_KEEP_RECENT = 3
+COMPACT_MIN_OUTPUT = 1000
+COMPACTABLE_ACTIONS = ('list', 'read', 'search', 'batch', 'previous_diff')
+# 修复阶段预留最后几次给 edit；分析阶段不预留。实际预留不超过额度的一半，避免小额度测试无法读取。
+EDIT_RESERVE = 4
+READ_ONLY_ACTIONS = ('list', 'read', 'search', 'batch', 'previous_diff', 'view_image')
+REPAIR_BRANCH_PREFIX = 'agentfix/'
+
+
+def message_chars(message):
+    content = message['content']
+    if isinstance(content, list):
+        return sum(len(part.get('text', '')) for part in content)
+    return len(content)
 
 
 async def run_process(args, cwd, timeout=60):
@@ -47,6 +65,16 @@ async def git(path, *args):
     return output.strip()
 
 
+def repair_branch_name(bug, run_id):
+    def slug(value, limit, fallback):
+        text = re.sub(r'[^\w-]+', '-', str(value or ''), flags=re.UNICODE)
+        return text[:limit].strip('-_') or fallback
+
+    bug_id = slug(bug.get('bug_id') or bug.get('id'), 8, 'bug')
+    title = slug(bug.get('title'), 24, 'repair')
+    return f'{REPAIR_BRANCH_PREFIX}{bug_id}-{title}-{run_id[:12]}'
+
+
 async def prepare_worktree(bug):
     if not bug.get('repo_path'):
         raise ValueError('未配置修复仓库，请先到项目管理绑定此云效项目')
@@ -60,26 +88,78 @@ async def prepare_worktree(bug):
     root = Path(get_settings().worktrees_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     worktree = root / f'repair-{run_id}'
-    branch = f'bug-agent/{run_id}'
+    branch = repair_branch_name(bug, run_id)
     await git(repo, 'worktree', 'add', '-b', branch, str(worktree), base)
     return {'worktree_path': str(worktree), 'repair_branch': branch, 'base_commit': base}
 
 
-def parse_json(response):
+def parse_json_objects(response):
+    """提取回复中连续的 JSON 对象，返回 (对象列表, 对象外的说明文字)。
+
+    部分中转模型不遵守 json_object 响应格式，会在 JSON 前写进度说明或拼接多个对象。
+    """
     if not isinstance(response, str):
         raise ValueError('模型没有返回文本')
-    response = response.strip()
-    if response.startswith('```'):
-        response = '\n'.join(response.splitlines()[1:-1])
-    try:
-        value = json.loads(response)
-    except json.JSONDecodeError as exc:
-        if exc.msg == 'Extra data':
-            raise ValueError('JSON 后存在额外内容，禁止拼接多个 JSON 对象；多个只读操作请使用一个 batch 对象') from exc
-        raise ValueError(f'无效 JSON：{exc.msg}（行 {exc.lineno}，列 {exc.colno}）') from exc
-    if not isinstance(value, dict):
-        raise ValueError('模型必须返回 JSON 对象')
-    return value
+    text = '\n'.join(line for line in response.strip().splitlines() if not line.strip().startswith('```'))
+    decoder = json.JSONDecoder()
+    first_error = None
+    start = text.find('{')
+    while start != -1:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError as exc:
+            first_error = first_error or exc
+            start = text.find('{', start + 1)
+            continue
+        if isinstance(value, dict):
+            break
+        start = text.find('{', end)
+    if start == -1:
+        if first_error:
+            raise ValueError(f'回复中的 JSON 无效：{first_error.msg}（行 {first_error.lineno}，列 {first_error.colno}）；只返回一个完整的 JSON 对象')
+        raise ValueError('回复中没有 JSON 对象，只有说明文字；说明请写在动作对象的 note 字段中')
+    objects, position = [value], end
+    while True:
+        rest = text[position:]
+        offset = len(rest) - len(rest.lstrip())
+        if not rest[offset:offset + 1] == '{':
+            break
+        try:
+            value, end = decoder.raw_decode(text, position + offset)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(value, dict):
+            break
+        objects.append(value)
+        position = end
+    prose = (text[:start] + ' ' + text[position:]).strip()
+    return objects, prose
+
+
+def parse_action(response):
+    """源码代理每轮一个动作；拼接的独立只读动作等价于 batch，含写入或结束的拼接仍拒绝。"""
+    objects, prose = parse_json_objects(response)
+    if len(objects) == 1:
+        request = objects[0]
+    else:
+        operations = []
+        for item in objects:
+            operations.extend(item.get('operations') or [] if item.get('action') == 'batch' else [item])
+        if any(not isinstance(item, dict) or item.get('action') not in ('list', 'read', 'search') for item in operations):
+            raise ValueError(f'回复拼接了 {len(objects)} 个 JSON 对象且包含非只读动作；每轮只能返回一个动作，edit/finish 必须单独返回')
+        if len(operations) > MAX_BATCH_OPERATIONS:
+            raise ValueError(f'回复拼接了 {len(operations)} 个只读操作，超过 batch 上限 {MAX_BATCH_OPERATIONS}；请分轮执行')
+        request = {'action': 'batch', 'operations': operations}
+    if prose and not request.get('note'):
+        request = {**request, 'note': prose[:1000]}
+    return request, len(objects)
+
+
+def parse_json(response):
+    objects, _ = parse_json_objects(response)
+    if len(objects) > 1:
+        raise ValueError('回复包含多个 JSON 对象，只能返回一个')
+    return objects[0]
 
 
 class RepositoryFiles:
@@ -239,7 +319,10 @@ class RepositoryFiles:
         return '已应用修改：' + ', '.join(pending)
 
 
-async def repository_agent(llm, worktree, prompt, writable=False, on_operation=None, image_urls=None, images_on_demand=False, source_context=None):
+async def repository_agent(llm, worktree, prompt, writable=False, on_operation=None, image_urls=None, images_on_demand=False, source_context=None, previous_attempt=None, stream=None):
+    from .repair_attempts import MAX_DIFF_PAGE, previous_diff
+    if not (previous_attempt and previous_attempt.get('attempt_ref') and previous_attempt.get('base_commit') and previous_attempt.get('git_commit_hash')):
+        previous_attempt = None
     deadline = time.monotonic() + get_settings().agent_timeout
     files = RepositoryFiles(worktree)
     await files.initialize()
@@ -269,6 +352,8 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
             size += len(output)
         if excerpts:
             content += '\n\n上一阶段阅读位置的最新源码（待分析数据）：\n' + '\n\n'.join(excerpts)
+    if previous_attempt:
+        system += '\n' + render_prompt('previous_diff', page_size=MAX_DIFF_PAGE)
     if image_urls:
         system += '\n' + render_prompt('images_on_demand', image_count=len(image_urls))
     if image_urls and images_on_demand:
@@ -282,7 +367,31 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
         {'role': 'user', 'content': content},
     ]
     completed_operations = set()
+    operation_cache = {}
     rounds, errors, consecutive_errors, finish_attempts = 0, 0, 0, 0
+    tool_outputs = []
+    turn_state = {'new_work': False}
+    reserve = min(EDIT_RESERVE, MAX_SOURCE_ROUNDS // 2) if writable else 0
+
+    def compact_history():
+        """按时间顺序把较早的大段工具结果换成占位，并允许重新执行这些操作。"""
+        size = sum(message_chars(message) for message in messages)
+        if size <= COMPACT_TRIGGER_CHARS:
+            return None
+        original, removed = size, 0
+        for entry in tool_outputs[:-COMPACT_KEEP_RECENT] if COMPACT_KEEP_RECENT else tool_outputs:
+            if size <= COMPACT_TARGET_CHARS:
+                break
+            if entry['compacted']:
+                continue
+            message = messages[entry['index']]
+            stub = render_prompt('compacted_output', operation=entry['operation'], size=message_chars(message))
+            size -= message_chars(message) - len(stub)
+            messages[entry['index']] = {**message, 'content': stub}
+            completed_operations.difference_update(entry['fingerprints'])
+            entry['compacted'] = True
+            removed += 1
+        return (removed, original, size) if removed else None
 
     async def read_operation(request):
         action = request.get('action')
@@ -293,18 +402,32 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
             detail = {'action': action, 'path': request['path'], 'start_line': request.get('start_line', 1), 'count': request.get('count', 200)}
         elif action == 'search':
             detail = {'action': action, 'path': request.get('path', ''), 'query': request['query'], 'regex': request.get('regex', True)}
+        elif action == 'previous_diff':
+            if not previous_attempt:
+                raise ValueError('没有可查看的上一轮修复差异')
+            detail = {'action': action, 'path': request.get('path', ''), 'offset': request.get('offset', 0)}
+            if detail['path']:
+                files.path(detail['path'])
         else:
             raise ValueError('batch 只允许 list/read/search 只读动作')
         fingerprint = json.dumps(detail, sort_keys=True, ensure_ascii=False)
         if fingerprint in completed_operations:
             raise ValueError('此操作已经执行，结果已在上文。请根据已有证据推进当前阶段')
+        if fingerprint in operation_cache:
+            # 压缩后原文已不在对话里；重放缓存不占用额度，避免把 30 次花在重读同一段代码上。
+            completed_operations.add(fingerprint)
+            return operation_cache[fingerprint]
         if action == 'list':
             output = files.list_files(detail['path'], detail['offset'])
         elif action == 'read':
             output = files.read(detail['path'], detail['start_line'], detail['count'])
+        elif action == 'previous_diff':
+            output = await previous_diff(worktree, previous_attempt, detail['path'], detail['offset'])
         else:
             output = await files.search(detail['query'], detail['path'], detail['regex'])
+        operation_cache[fingerprint] = output
         completed_operations.add(fingerprint)
+        turn_state['new_work'] = True
         return output
 
     # 有效操作、错误重试与结束请求分别有界，禁止无界重试或静默成功。
@@ -314,17 +437,25 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
             finish_attempts += 1
             if finish_attempts > MAX_FINISH_ATTEMPTS:
                 break
+        compacted = compact_history()
+        if compacted and on_operation:
+            await on_operation(f'上下文压缩：{compacted[0]} 条较早的工具结果替换为占位说明，约 {compacted[1]} → {compacted[2]} 字符')
         guidance = render_prompt('finish_reminder', remaining=remaining, stage_goal=stage_goal)
+        if reserve and 0 < remaining <= reserve:
+            guidance += '\n剩余额度只留给修改：现在只允许 edit 或 finish。读取和搜索会被拒绝，不要重试，立即修改已确认的代码。'
         if remaining == 0:
             guidance += '\n有效源码操作额度已耗尽，仅允许 finish；不能再读取或修改。未完成请返回blocked_reason。'
         messages.append({'role': 'user', 'content': guidance})
+        operations_before = set(completed_operations)
         received, last_progress = 0, 0.0
         response_diagnostics = {}
         log_context = f'{Path(worktree).name}/{"fix" if writable else "analyze"}/{turn + 1}'
         async def report_chunk(chunk):
             nonlocal received, last_progress
             received += len(chunk)
-            if on_operation and time.monotonic() - last_progress >= 4:
+            if stream:
+                await stream.content(chunk)
+            elif on_operation and time.monotonic() - last_progress >= 4:
                 last_progress = time.monotonic()
                 await on_operation(f'模型请求 {turn + 1}：正在流式生成，已接收 {received} 字符；有效源码操作 {rounds}/{MAX_SOURCE_ROUNDS}，失败 {errors}/{MAX_OPERATION_ERRORS}')
         try:
@@ -332,13 +463,19 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
             time_left = deadline - time.monotonic()
             if time_left <= 0:
                 raise ValueError('当前 Agent 源码阶段超过总执行时限；已有修改保留在工作树')
-            response = await asyncio.wait_for(llm.ainvoke(list(messages), temperature=0.0, response_format={'type': 'json_object'}, on_chunk=report_chunk, on_response=response_diagnostics.update, log_context=log_context), timeout=min(120, time_left))
+            if stream:
+                stream.start(f'{"修复" if writable else "分析"} · 请求 {turn + 1}')
+            response = await asyncio.wait_for(llm.ainvoke(list(messages), temperature=0.0, response_format={'type': 'json_object'}, on_chunk=report_chunk, on_response=response_diagnostics.update, log_context=log_context, on_reasoning=stream.reasoning if stream else None), timeout=min(120, time_left))
         except asyncio.TimeoutError as exc:
             if time_left < 120:
                 raise ValueError('当前 Agent 源码阶段超过总执行时限；已有修改保留在工作树') from exc
             raise ValueError(f'模型请求超过 120 秒，当前提供商未及时响应；有效源码操作 {rounds}/{MAX_SOURCE_ROUNDS}，已有修改保留在工作树') from exc
+        finally:
+            if stream:
+                await stream.finish()
         had_images = any(isinstance(message['content'], list) for message in messages)
         messages.append({'role': 'assistant', 'content': response})
+        assistant_index = len(messages) - 1
         if had_images:
             messages = [
                 {**message, 'content': '\n'.join(part['text'] if part['type'] == 'text' else '原图已从请求卸载；需要核对时使用 view_image。' for part in message['content'])}
@@ -347,9 +484,17 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
         request = {}
         parsed = False
         terminal_error = None
+        skip_round = False
+        turn_state['new_work'] = False
         try:
-            request = parse_json(response)
+            request, object_count = parse_action(response)
             parsed = True
+            # 历史中只保留规范 JSON，避免模型在后续轮次模仿自己的格式偏差。
+            messages[assistant_index] = {'role': 'assistant', 'content': json.dumps(request, ensure_ascii=False)}
+            if stream:
+                await stream.say(request.get('note'))
+            if object_count > 1 and on_operation:
+                await on_operation(f'模型请求 {turn + 1}：回复拼接了 {object_count} 个只读动作，已合并为一个 batch 执行')
             if had_images and (not isinstance(request.get('image_observation'), str) or not request['image_observation'].strip()):
                 raise ValueError('看图响应必须包含 image_observation；请再次使用 view_image 核对并记录可见事实')
             action = request.get('action')
@@ -368,7 +513,10 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
             if remaining == 0:
                 terminal_error = f'已达到 {MAX_SOURCE_ROUNDS} 轮有效源码操作上限，未完成结束确认；已有修改保留在工作树'
                 raise ValueError(terminal_error)
-            if action == 'view_image':
+            if reserve and remaining <= reserve and action in READ_ONLY_ACTIONS:
+                output = f'剩余 {remaining} 次操作只允许 edit 或 finish，请立即修改代码。不要再读取或搜索。'
+                skip_round = True
+            elif action == 'view_image':
                 index = request.get('image')
                 if type(index) is not int or not image_urls or not 1 <= index <= len(image_urls):
                     raise ValueError('图片编号无效，请使用已有原图的编号')
@@ -376,7 +524,7 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
                     {'type': 'text', 'text': render_prompt('image_caption', image=index)},
                     {'type': 'image_url', 'image_url': {'url': image_urls[index - 1]}},
                 ]
-            elif action in ('list', 'read', 'search'):
+            elif action in ('list', 'read', 'search', 'previous_diff'):
                 output = await read_operation(request)
             elif action == 'batch':
                 operations = request.get('operations')
@@ -402,10 +550,15 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
                 raise ValueError('不支持的动作')
             if action == 'edit':
                 completed_operations.clear()
-            rounds += 1
+                operation_cache.clear()
+            if not skip_round and (action in ('edit', 'view_image') or turn_state['new_work']):
+                rounds += 1
             consecutive_errors = 0
         except (ValueError, KeyError, TypeError, OSError) as exc:
             if not parsed:
+                if stream and isinstance(response, str) and '{' not in response:
+                    await stream.say(response)
+                messages[assistant_index] = {'role': 'assistant', 'content': '（上一条回复不是有效的单个 JSON 动作，原文已省略）'}
                 diagnostic = f'模型响应解析失败：{log_context}；{json.dumps(response_diagnostics or response_summary(response), ensure_ascii=False)}'
                 logger.warning(diagnostic)
                 if on_operation:
@@ -414,9 +567,14 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
             consecutive_errors += 1
             output = f'操作失败：{exc}。请修正后重试。'
         detail = {key: request[key] for key in ('action', 'image', 'path', 'query', 'regex', 'start_line', 'count', 'offset') if key in request}
-        status = '返回所选原图，仅下一次请求携带' if isinstance(output, list) else output[:500] if output.startswith('操作失败') else f'返回 {len(output)} 字符'
-        if request.get('action') == 'batch' and not output.startswith('操作失败'):
-            status += f'，批量操作 {succeeded}/{len(operations)} 成功'
+        if skip_round:
+            status = '已拒绝读取，剩余额度只允许 edit 或 finish，不占用额度'
+        else:
+            status = '返回所选原图，仅下一次请求携带' if isinstance(output, list) else output[:500] if output.startswith('操作失败') else f'返回 {len(output)} 字符'
+            if request.get('action') == 'batch' and not output.startswith('操作失败'):
+                status += f'，批量操作 {succeeded}/{len(operations)} 成功'
+            if parsed and not turn_state['new_work'] and request.get('action') in COMPACTABLE_ACTIONS and not str(output).startswith('操作失败'):
+                status += '，不占用额度'
         if request.get('action') == 'batch':
             detail['operations'] = request.get('operations')
         operation = f'源码操作 {rounds}/{MAX_SOURCE_ROUNDS}（请求 {turn + 1}，失败 {errors}/{MAX_OPERATION_ERRORS}）：{json.dumps(detail, ensure_ascii=False)}；{status}'
@@ -424,6 +582,9 @@ async def repository_agent(llm, worktree, prompt, writable=False, on_operation=N
         if on_operation:
             await on_operation(operation)
         messages.append({'role': 'user', 'content': output})
+        if isinstance(output, str) and request.get('action') in COMPACTABLE_ACTIONS and not output.startswith('操作失败') and len(output) >= COMPACT_MIN_OUTPUT:
+            tool_outputs.append({'index': len(messages) - 1, 'operation': json.dumps(detail, ensure_ascii=False)[:300],
+                                 'fingerprints': completed_operations - operations_before, 'compacted': False})
         if terminal_error:
             raise ValueError(terminal_error)
         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS or errors >= MAX_OPERATION_ERRORS:
@@ -448,7 +609,7 @@ async def verify_worktree(worktree, command):
     return {'passed': code == 0, 'command': command, 'exit_code': code, 'output': output[-20000:]}
 
 
-async def verify_and_commit_repair(worktree, command, bug_id, repair_branch, base_commit):
+async def verify_and_commit_repair(worktree, command, bug_id, repair_branch, base_commit, *, bug_title=''):
     """系统提交与验证完全相同的树，模型不能提交或变更交付对象。"""
     if not repair_branch or not base_commit:
         raise ValueError('修复分支或基础提交记录缺失，请重新执行')
@@ -476,8 +637,9 @@ async def verify_and_commit_repair(worktree, command, bug_id, repair_branch, bas
     if current_tree != tree or current_names != names or await git(worktree, 'rev-parse', 'HEAD') != head:
         raise ValueError('验证期间源码或提交发生变化，不能交付；请重新执行验证')
     # commit-tree 固定已验证的树，不运行可能修改内容的提交钩子，也不依赖用户全局身份。
+    title = ' '.join(bug_title.split())[:120] or f'repair bug {bug_id}'
     commit = await git(worktree, '-c', 'user.name=Bug Repair Agent', '-c', 'user.email=bug-agent@localhost',
-                       'commit-tree', tree, '-p', head, '-m', f'fix: repair bug {bug_id}')
+                       'commit-tree', tree, '-p', head, '-m', f'fix: {title}\n\nBug: {bug_id}')
     await git(worktree, 'update-ref', f'refs/heads/{repair_branch}', commit, head)
     if await git(worktree, 'status', '--porcelain'):
         raise ValueError('生成提交后工作树发生变化，已保留提交但不能进入验收')

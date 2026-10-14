@@ -1,5 +1,5 @@
 import api from './api';
-import type { Bug, TaskSubmitRequest } from '../types';
+import type { Bug, BugSupplement, TaskSubmitRequest } from '../types';
 
 export const bugService = {
   // 获取 Bug 列表
@@ -29,6 +29,16 @@ export const bugService = {
   // 获取 Bug 详情
   async get(bugId: string) {
     const response = await api.get(`/api/bugs/${encodeURIComponent(bugId)}/details`);
+    return response.data;
+  },
+
+  async supplement(bugId: string): Promise<BugSupplement> {
+    const response = await api.get(`/api/bugs/${encodeURIComponent(bugId)}/supplement`);
+    return response.data;
+  },
+
+  async saveSupplement(bugId: string, supplement: BugSupplement): Promise<BugSupplement> {
+    const response = await api.put(`/api/bugs/${encodeURIComponent(bugId)}/supplement`, supplement);
     return response.data;
   },
 

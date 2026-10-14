@@ -50,14 +50,14 @@ def bug_image_urls(bug):
     return urls
 
 
-async def agent_bug_images(bug):
+async def agent_bug_images(bug, *, materialize=False):
     """云效签名地址很快过期，获取详情后立即读取，供整个修复流程使用。"""
     urls = bug_image_urls(bug)
     resolved = set((bug.get('media_urls') or {}).values())
     images = []
     async with httpx.AsyncClient(timeout=30) as client:
         for url in urls:
-            if url not in resolved:
+            if url not in resolved and not materialize:
                 images.append(url)
                 continue
             try:

@@ -41,6 +41,7 @@ const BugList: React.FC = () => {
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [reviewAgent, setReviewAgent] = useState<string | null>(null);
   const [detailBugId, setDetailBugId] = useState<string | null>(null);
+  const [detailDirty, setDetailDirty] = useState(false);
   const [form] = Form.useForm();
   const hasActiveTasks = bugs.some((bug) => ['analyzing', 'fixing', 'testing'].includes(bug.status));
 
@@ -98,6 +99,13 @@ const BugList: React.FC = () => {
     } finally {
       setSyncing(false);
     }
+  };
+
+  const changeDetails = (bugId: string | null) => {
+    const change = () => { setDetailBugId(bugId); setDetailDirty(false); };
+    if (bugId === detailBugId) return;
+    if (detailDirty) Modal.confirm({ title: '补充信息尚未保存', content: '离开当前 Bug 将丢弃修改。', okText: '丢弃并离开', cancelText: '继续编辑', onOk: change });
+    else change();
   };
 
   const handleSubmitTask = async (bugId: string) => {
@@ -174,7 +182,7 @@ const BugList: React.FC = () => {
       render: (_: string, bug: Bug) => <BugLink bug={bug} onClick={(event) => {
         if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
-        setDetailBugId(bug.bug_id);
+        changeDetails(bug.bug_id);
       }} />,
     },
     {
@@ -323,10 +331,10 @@ const BugList: React.FC = () => {
         styles={{ mask: { background: 'transparent' } }}
         rootClassName="bug-detail-drawer"
         open={detailBugId !== null}
-        onClose={() => setDetailBugId(null)}
+        onClose={() => changeDetails(null)}
         destroyOnClose
       >
-        {detailBugId && <BugDetail bugId={detailBugId} embedded />}
+        {detailBugId && <BugDetail bugId={detailBugId} embedded onDirtyChange={setDetailDirty} onStarted={() => void loadBugs()} />}
       </Drawer>
       </section>
       <RepairReview agentId={reviewAgent} onClose={() => setReviewAgent(null)} onConfirmed={() => void loadBugs()} />

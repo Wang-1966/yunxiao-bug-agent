@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiosqlite
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -27,6 +28,8 @@ async def task_db(tmp_path, monkeypatch):
         await db.commit()
     monkeypatch.setattr(orchestrator.settings, "database_url", f"sqlite+aiosqlite:///{path}")
     monkeypatch.setattr(agents, "get_db_path", lambda: str(path))
+    monkeypatch.setattr('src.tools.yunxiao.openapi_client.YunxiaoClient.set_bug_in_progress',
+                        AsyncMock(return_value={'status_id': 'test-progress', 'source_status': '处理中'}))
     return path
 
 
@@ -46,6 +49,44 @@ async def test_api_really_enqueues_and_rejects_duplicate(task_db):
         statuses = await agents.list_agents()
         assert len(statuses) == 2
         assert all(a.status == "busy" and a.current_stage == "queued" for a in statuses)
+
+
+@pytest.mark.asyncio
+async def test_submit_assigns_a_nickname(task_db):
+    runner = orchestrator.MultiAgentOrchestrator()
+    runner._running = True
+    await runner.submit_task("one")
+    await runner.submit_task("two")
+    async with aiosqlite.connect(task_db) as db:
+        names = [row[0] for row in await (await db.execute("SELECT name FROM agents")).fetchall()]
+    assert len(names) == 2 and len(set(names)) == 2
+    assert set(names) <= set(orchestrator.AGENT_NICKNAMES)
+
+
+def test_nickname_adds_a_number_after_the_pool_is_used():
+    taken = set(orchestrator.AGENT_NICKNAMES)
+    base, number = orchestrator.pick_agent_name(taken).rsplit(" ", 1)
+    assert base in orchestrator.AGENT_NICKNAMES and number == "2"
+    taken.update(f"{name} 2" for name in orchestrator.AGENT_NICKNAMES)
+    base, number = orchestrator.pick_agent_name(taken).rsplit(" ", 1)
+    assert base in orchestrator.AGENT_NICKNAMES and number == "3"
+
+
+@pytest.mark.asyncio
+async def test_start_renames_stiff_agent_names(task_db):
+    async with aiosqlite.connect(task_db) as db:
+        await db.execute(
+            "INSERT INTO agents (agent_id, name, status) VALUES ('agent-task-abc12345', '修复 Agent task-abc12345', 'idle')"
+        )
+        await db.commit()
+    runner = orchestrator.MultiAgentOrchestrator()
+    await runner.start()
+    try:
+        async with aiosqlite.connect(task_db) as db:
+            name = (await (await db.execute("SELECT name FROM agents")).fetchone())[0]
+        assert name in orchestrator.AGENT_NICKNAMES
+    finally:
+        await runner.stop()
 
 
 @pytest.mark.asyncio
@@ -419,6 +460,7 @@ async def test_feedback_resume_failure_is_recorded_and_retry_keeps_feedback(task
 @pytest.mark.asyncio
 @pytest.mark.parametrize('confirmed', [True, False])
 async def test_real_repair_waits_for_confirmation_survives_restart_and_records_decision(task_db, tmp_path, monkeypatch, confirmed):
+    from src.tools.yunxiao.openapi_client import YunxiaoClient
     runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
     # 用新协调器模拟内存完全丢失，所有证据必须从数据库读取。
     restarted = orchestrator.MultiAgentOrchestrator()
@@ -433,33 +475,56 @@ async def test_real_repair_waits_for_confirmation_survives_restart_and_records_d
             assert result.modified_files == ['app.py']
             assert result.fix_summary == 'Correct value assignment'
             assert result.repair_branch
+            assert result.repair_branch.startswith('agentfix/one-真实-Bug-')
             assert result.confirmation['status'] == 'pending'
             assert 'value = 2' in (await agents.agent_diff(agent_id))['diff']
             assert result.git_commit_hash
             worktree = Path(result.worktree_path)
+            repair_branch = result.repair_branch
+            verified_commit = result.git_commit_hash
             repo = tmp_path / 'source'
             assert subprocess.check_output(['git', '-C', str(worktree), 'status', '--porcelain']).decode() == ''
             if confirmed:
                 # 修改隔离已单独断言；成功交付场景要求目标仓库干净。
                 subprocess.run(['git', '-C', str(repo), 'restore', 'app.py'], check=True)
             decision = RepairConfirmation(confirmed=confirmed, feedback='' if confirmed else 'value 在其他输入下仍错误')
-            await agents.confirm_agent_repair(agent_id, decision)
+            confirmed_result = await agents.confirm_agent_repair(agent_id, decision)
+            assert YunxiaoClient.set_bug_in_progress.await_count == (1 if confirmed else 0)
+            if confirmed:
+                assert confirmed_result['yunxiao_sync']['status'] == 'succeeded'
             result = await agents.get_agent(agent_id)
-            assert result.current_bug['status'] == ('resolved' if confirmed else 'failed')
+            # 驳回后自动开始下一轮，Bug 已被新任务认领。
+            assert result.current_bug['status'] == ('resolved' if confirmed else 'analyzing')
             assert bool(result.current_bug['resolved_at']) is confirmed
             assert result.confirmation['user_choice']['confirmed'] is confirmed
+            assert not worktree.exists()
+            assert result.worktree_path is None
             if confirmed:
                 assert (repo / 'app.py').read_text().startswith('value = 2')
-                assert not worktree.exists()
-                assert result.worktree_path is None
                 assert result.confirmation['user_choice']['merge']['cleanup_pending'] is False
+                assert result.current_bug['source_status'] == '处理中'
+                message = subprocess.check_output(['git', '-C', str(repo), 'log', '-1', '--format=%B']).decode().strip()
+                assert message == f"Merge branch '{repair_branch}' into main"
+                assert subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD^2']).decode().strip() == verified_commit
+                assert subprocess.check_output(['git', '-C', str(repo), 'show', '-s', '--format=%s', verified_commit]).decode().strip() == 'fix: 真实 Bug'
             with pytest.raises(HTTPException) as exc:
                 await agents.confirm_agent_repair(agent_id, decision)
             assert exc.value.status_code == 409
             if not confirmed:
+                restart = confirmed_result['restart']
+                assert restart['started'] is True and restart['round'] == 2
+                assert result.current_bug['assigned_agent_id'] == restart['agent_id']
+                assert subprocess.run(['git', '-C', str(repo), 'show-ref', '--verify', f'refs/heads/{result.repair_branch}']).returncode != 0
                 from src.core.repair_review import latest_repair_feedback
-                assert await latest_repair_feedback(str(task_db), 'one') == decision.feedback
-                await agents.submit_task(TaskSubmitRequest(bug_id='one'))
+                from src.core.repair_attempts import latest_rejected_attempt
+                assert await latest_repair_feedback(str(task_db), 'one') == ''
+                attempt = await latest_rejected_attempt(str(task_db), 'one')
+                assert attempt['round'] == 1 and attempt['feedback'] == decision.feedback
+                assert attempt['modified_files'] == ['app.py'] and 'app.py' in attempt['diff_stat']
+                # 分支已删，隐藏引用仍保住提交，可按需查看差异。
+                assert subprocess.check_output(['git', '-C', str(repo), 'rev-parse', attempt['attempt_ref']]).decode().strip() == attempt['git_commit_hash']
+                from src.core.repair_attempts import previous_diff
+                assert '+value = 2' in await previous_diff(repo, attempt, 'app.py')
                 with pytest.raises(HTTPException):
                     await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True))
         finally:
@@ -499,10 +564,38 @@ async def test_real_failed_command_cannot_publish_a_confirmation(task_db, tmp_pa
 @pytest.mark.asyncio
 async def test_deleted_pending_review_releases_bug_for_retry(task_db, tmp_path, monkeypatch):
     runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
-    path = runner.get_agent_status(agent_id)['state']['worktree_path']
+    state = runner.get_agent_status(agent_id)['state']
+    repo = tmp_path / 'source'
     await runner.delete_agent(agent_id)
-    assert Path(path).is_dir()
+    assert not Path(state['worktree_path']).exists()
+    assert state['worktree_path'] not in subprocess.check_output(['git', '-C', str(repo), 'worktree', 'list']).decode()
+    assert not subprocess.check_output(['git', '-C', str(repo), 'branch', '--list', state['repair_branch']]).strip()
     assert await runner.submit_task('one')
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_removes_only_unreferenced_worktrees(task_db, tmp_path, monkeypatch):
+    from src.core.repair_merge import sweep_orphan_worktrees
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    kept = runner.get_agent_status(agent_id)['state']['worktree_path']
+    repo = tmp_path / 'source'
+    orphan = tmp_path / 'worktrees' / 'repair-orphan'
+    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-b', 'bug-agent/orphan', str(orphan), 'main'], check=True, capture_output=True)
+    (orphan / 'node_modules').mkdir()
+    subprocess.run(['git', '-C', str(repo), 'branch', 'bug-agent/gone', 'main'], check=True)
+    new_orphan = tmp_path / 'worktrees' / 'repair-new-orphan'
+    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-b', 'agentfix/orphan-标题-123456abcdef', str(new_orphan), 'main'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(repo), 'branch', 'agentfix/gone-标题-123456abcdef', 'main'], check=True)
+    external = tmp_path / 'manual-worktree'
+    external_branch = 'agentfix/manual-标题-123456abcdef'
+    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-b', external_branch, str(external), 'main'], check=True, capture_output=True)
+    await sweep_orphan_worktrees(task_db)
+    assert Path(kept).is_dir() and not orphan.exists()
+    assert not new_orphan.exists() and external.exists()
+    branches = subprocess.check_output(['git', '-C', str(repo), 'branch', '--list', 'bug-agent/*', 'agentfix/*']).decode()
+    assert 'orphan' not in branches and 'gone' not in branches
+    assert runner.get_agent_status(agent_id)['state']['repair_branch'] in branches
+    assert external_branch in branches
 
 
 @pytest.mark.asyncio
@@ -549,6 +642,34 @@ async def test_cleanup_failure_records_delivery_and_retry_never_remerges(task_db
 
 
 @pytest.mark.asyncio
+async def test_cleanup_retry_removes_cache_left_by_running_dev_server(task_db, tmp_path, monkeypatch):
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    repo = tmp_path / 'source'
+    subprocess.run(['git', '-C', str(repo), 'restore', 'app.py'], check=True)
+    with patch.object(agents, 'get_orchestrator', return_value=runner):
+        from src.core import repair_merge
+        worktree = Path((await agents.get_agent(agent_id)).worktree_path)
+        real_run = repair_merge.run_process
+
+        async def remove_then_dev_server_writes(args, cwd, *rest):
+            if 'remove' not in args:
+                return await real_run(args, cwd, *rest)
+            subprocess.run(['git', '-C', str(repo), 'worktree', 'remove', str(worktree)], check=True)
+            (worktree / '.vite' / 'deps').mkdir(parents=True)
+            return 1, "error: failed to delete: Directory not empty"
+
+        with patch('src.core.repair_merge.run_process', side_effect=remove_then_dev_server_writes), \
+             patch('src.core.repair_merge.shutil.rmtree'):
+            result = await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True))
+        assert result['merge']['cleanup_pending'] is True
+        assert '进程占用' in result['merge']['cleanup_error']
+        result = await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True))
+        assert result['merge']['cleanup_pending'] is False
+        assert not worktree.exists()
+        assert not subprocess.check_output(['git', '-C', str(repo), 'branch', '--list', 'bug-agent/*', 'agentfix/*']).strip()
+
+
+@pytest.mark.asyncio
 async def test_merge_conflict_aborts_only_system_merge_and_keeps_repair(task_db, tmp_path, monkeypatch):
     runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
     repo = tmp_path / 'source'
@@ -586,3 +707,181 @@ async def test_retry_after_merge_succeeded_does_not_duplicate_merge(task_db, tmp
         result = await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True))
         assert result['merge']['merge_commit'] == head
         assert result['status'] == 'resolved'
+
+
+PNG = 'data:image/png;base64,' + __import__('base64').b64encode(b'\x89PNG\r\n\x1a\n' + b'feedback').decode()
+
+
+@pytest.mark.asyncio
+async def test_image_only_proposal_feedback_reanalyzes_with_screenshot(task_db, tmp_path):
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    (worktree / 'app.py').write_text('value = 1\n')
+    runner = orchestrator.MultiAgentOrchestrator()
+    runner._running = True
+    task_id = await runner.submit_task('one')
+    _, _, task = runner.task_queue.get_nowait()
+    agent_id = f'agent-{task_id}'
+    runner.agent_states[agent_id]['state'] = {'bug_id': 'one', 'stage': 'awaiting_plan_confirmation', 'proposals': [{'name': '旧方案'}], 'worktree_path': str(worktree), 'repair_branch': 'repair'}
+    await runner._save_status(agent_id, task, 'awaiting_plan_confirmation', 'awaiting_plan_confirmation', '待确认')
+    client = AsyncMock()
+    client.ainvoke.return_value = json.dumps({'proposals': [{'name': '新方案'}]})
+    seen = []
+
+    async def operate(llm, path, prompt, writable=False, **kwargs):
+        seen.append((prompt, kwargs.get('image_urls')))
+        return {'root_cause': '看图后的理解', 'confidence': 'high'}
+
+    with pytest.raises(ValueError, match='PNG'):
+        await runner.confirm_proposal(agent_id, 0, '', None, ['data:text/html;base64,AAAA'])
+    with patch('src.api.bugs.get_bug_details', AsyncMock(return_value={'title': 'Bug', 'description': '描述'})), \
+         patch('src.agent.nodes.LLMFactory.create', return_value=client), \
+         patch('src.agent.nodes.describe_bug_images', AsyncMock(return_value=None)), \
+         patch('src.agent.nodes.repository_agent', side_effect=operate):
+        result = await runner.confirm_proposal(agent_id, 0, '  ', None, [PNG])
+        assert result['status'] == 'analyzing'
+        await runner.running_agents[agent_id]
+    assert seen[-1][1] == [PNG]
+    assert '原图编号 1–1' in seen[-1][0] and 'view_image' in seen[-1][0]
+    assert runner.agent_states[agent_id]['status'] == 'awaiting_plan_confirmation'
+    async with aiosqlite.connect(task_db) as db:
+        choice = json.loads((await (await db.execute("SELECT user_choice FROM decisions WHERE agent_id=? AND status='answered'", (agent_id,))).fetchone())[0])
+    assert len(choice['images']) == 1 and PNG not in json.dumps(choice)
+
+
+async def add_decision(db, decision_id, agent_id, stage, choice):
+    await db.execute("INSERT INTO decisions (decision_id, bug_id, agent_id, stage, question, options, user_choice, status) VALUES (?, 'one', ?, ?, 'q', '[]', ?, 'answered')",
+                     (decision_id, agent_id, stage, json.dumps(choice, ensure_ascii=False)))
+
+
+@pytest.mark.asyncio
+async def test_only_latest_rejected_round_is_carried_and_auto_restart_is_capped(task_db):
+    from src.core.repair_review import latest_repair_feedback
+    from src.core.repair_attempts import latest_rejected_attempt
+    async with aiosqlite.connect(task_db) as db:
+        for agent_id, root in (('agent-a', '第一轮根因'), ('agent-b', '第二轮根因')):
+            await db.execute("INSERT INTO task_history (task_id, bug_id, agent_id, stage, status, result) VALUES (?, 'one', ?, 'rejected', 'rejected', ?)",
+                             (agent_id, agent_id, json.dumps({'root_cause': root, 'diff_stat': f'diff {root}', 'source_context': {'reads': [{'path': f'{agent_id}.vue'}]}}, ensure_ascii=False)))
+        await add_decision(db, 'p-a', 'agent-a', 'proposal', {'feedback': '第一轮纠正'})
+        await add_decision(db, 'v-a', 'agent-a', 'verify', {'confirmed': False, 'feedback': '第一轮仍错'})
+        await add_decision(db, 'p-b', 'agent-b', 'proposal', {'feedback': '第二轮纠正'})
+        await add_decision(db, 'v-b', 'agent-b', 'verify', {'confirmed': False, 'feedback': '第二轮仍错', 'images': ['x.png']})
+        await db.commit()
+    assert await latest_repair_feedback(str(task_db), 'one') == '第二轮纠正'
+    attempt = await latest_rejected_attempt(str(task_db), 'one')
+    assert attempt['round'] == 2 and attempt['root_cause'] == '第二轮根因' and attempt['feedback'] == '第二轮仍错'
+    assert attempt['diff_stat'] == 'diff 第二轮根因' and attempt['image_count'] == 1
+    assert attempt['evidence_reads'] == [{'path': 'agent-b.vue'}]
+
+    runner = orchestrator.MultiAgentOrchestrator()
+    with patch.object(agents, 'get_orchestrator', return_value=runner):
+        failed = await agents._restart_rejected_repair('one')
+        assert failed['started'] is False and '可手动重新执行' in failed['reason']
+        runner._running = True
+        async with aiosqlite.connect(task_db) as db:
+            await add_decision(db, 'v-c', 'agent-b', 'verify', {'confirmed': False, 'feedback': '第三轮仍错'})
+            await db.commit()
+        capped = await agents._restart_rejected_repair('one')
+    assert capped['started'] is False and '连续 3 轮' in capped['reason']
+    assert runner.task_queue.empty()
+
+
+@pytest.mark.parametrize('action', ['confirm', 'reject', 'delete'])
+@pytest.mark.parametrize('fixed', [False, True])
+async def test_preview_api_and_review_cleanup(task_db, tmp_path, monkeypatch, action, fixed):
+    import shlex
+    from src.api import projects
+    from src.core import preview_manager
+
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    repo = tmp_path / 'source'
+    monkeypatch.setattr(projects, 'get_db_path', lambda: str(task_db))
+    await projects.save_project('preview-project', projects.ProjectConfig(
+        name='preview', repo_path=str(repo), branch='main',
+        preview_command=f'{shlex.quote(sys.executable)} -u -m http.server {{port}} --bind 127.0.0.1',
+        preview_port=preview_manager._free_port() if fixed else None,
+    ))
+    async with aiosqlite.connect(task_db) as db:
+        await db.execute("UPDATE bugs SET source_project_id='preview-project' WHERE bug_id='one'")
+        await db.commit()
+    with patch.object(agents, 'get_orchestrator', return_value=runner):
+        result = await agents.start_agent_preview(agent_id)
+        port = result['internal_port']
+        try:
+            async with asyncio.timeout(10):
+                while (await agents.get_preview(agent_id))['status'] != 'running':
+                    await asyncio.sleep(0.05)
+            # 验收和删除必须主动停止预览，才能清理工作树。
+            if action == 'delete':
+                await agents.delete_agent(agent_id)
+            else:
+                subprocess.run(['git', '-C', str(repo), 'restore', 'app.py'], check=True)
+                from src.core.repair_review import confirm_repair
+                await confirm_repair(str(task_db), agent_id, RepairConfirmation(
+                    confirmed=action == 'confirm', feedback='仍然错误' if action == 'reject' else '',
+                ))
+            assert (await preview_manager.preview_status(agent_id))['status'] == 'stopped'
+            with pytest.raises(OSError):
+                _, writer = await asyncio.open_connection('127.0.0.1', port)
+                writer.close()
+            if fixed:
+                async with asyncio.timeout(10):
+                    while (await preview_manager.project_status(str(repo)))['status'] != 'running':
+                        await asyncio.sleep(0.05)
+                current = await preview_manager.project_status(str(repo))
+                assert current['source'] == 'project'
+                async with httpx.AsyncClient() as browser:
+                    assert (await browser.get(current['url'] + '/app.py')).status_code == 200
+            if action != 'delete':
+                with pytest.raises(HTTPException) as stale:
+                    await agents.start_agent_preview(agent_id)
+                assert stale.value.status_code == 409
+        finally:
+            await preview_manager.stop_all()
+
+
+async def test_failed_yunxiao_sync_retries_without_remerging(task_db, tmp_path, monkeypatch):
+    from src.tools.yunxiao.openapi_client import YunxiaoClient, YunxiaoError
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    repo = tmp_path / 'source'
+    subprocess.run(['git', '-C', str(repo), 'restore', 'app.py'], check=True)
+    sync = AsyncMock(side_effect=YunxiaoError('Token 缺少工作项读写权限'))
+    monkeypatch.setattr(YunxiaoClient, 'set_bug_in_progress', sync)
+    with patch.object(agents, 'get_orchestrator', return_value=runner):
+        with pytest.raises(HTTPException) as pending:
+            await agents.retry_yunxiao_status_sync(agent_id)
+        assert pending.value.status_code == 409
+        sync.assert_not_awaited()
+        result = await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True))
+        assert result['status'] == 'resolved' and result['yunxiao_sync']['status'] == 'failed'
+        before = await agents.get_agent(agent_id)
+        assert before.confirmation['user_choice']['yunxiao_sync']['error'] == 'Token 缺少工作项读写权限'
+        assert before.current_bug['status'] == 'resolved' and before.worktree_path is None
+        head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).strip()
+        # 模拟后端重启，只从数据库恢复待同步记录。
+        restarted = orchestrator.MultiAgentOrchestrator()
+        sync.side_effect = None
+        sync.return_value = {'status_id': 'progress', 'source_status': '处理中'}
+        with patch.object(agents, 'get_orchestrator', return_value=restarted), \
+             patch('src.core.repair_review.merge_confirmed_repair', AsyncMock()) as merge:
+            result = await agents.retry_yunxiao_status_sync(agent_id)
+            assert result['status'] == 'succeeded'
+            assert (await agents.retry_yunxiao_status_sync(agent_id))['status'] == 'succeeded'
+        merge.assert_not_awaited()
+        assert sync.await_count == 2
+        assert subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).strip() == head
+        after = await agents.get_agent(agent_id)
+        assert after.current_bug['source_status'] == '处理中' and after.current_bug['status'] == 'resolved'
+
+
+async def test_manual_bug_confirmation_does_not_write_yunxiao(task_db, tmp_path, monkeypatch):
+    from src.tools.yunxiao.openapi_client import YunxiaoClient
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    async with aiosqlite.connect(task_db) as db:
+        await db.execute("UPDATE bugs SET source='manual' WHERE bug_id='one'")
+        await db.commit()
+    subprocess.run(['git', '-C', str(tmp_path / 'source'), 'restore', 'app.py'], check=True)
+    with patch.object(agents, 'get_orchestrator', return_value=runner):
+        result = await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True))
+    assert result['status'] == 'resolved' and result['yunxiao_sync'] is None
+    YunxiaoClient.set_bug_in_progress.assert_not_awaited()

@@ -6,8 +6,9 @@
 {"action":"search","query":"文本或A|B正则表达式","path":"src/pages","regex":true}（默认扩展正则；普通文本可设regex=false）
 {"action":"batch","operations":[{"action":"read","path":"src/a.vue"},{"action":"read","path":"src/b.ts"}]}（最多5个独立的只读list/read/search操作；禁止嵌套、edit、finish、view_image）
 {"action":"finish","result":{...}}。
-严禁拼接多个JSON对象。并行阅读需求必须使用一个batch对象；存在依赖的操作分轮执行。
+严禁拼接多个JSON对象，JSON 外不要写任何文字。需要说明当前判断时写在动作对象的 note 字段（不超过200字），例如 {"action":"read","path":"src/a.vue","note":"确认缩进后为何关闭工具栏"}。并行阅读需求必须使用一个batch对象；存在依赖的操作分轮执行。
 工具读文件输出中的行号仅供定位，不属于源文件内容。
+对话过长时较早的工具结果会被压缩为占位说明；读到关键证据后在回复中简要记录。同一范围再次读取不占用额度。修复阶段最后几次操作只允许修改代码。
 优先按业务目录缩小范围，阅读搜索命中附近源码；不要重复相同操作。
 最多 $max_rounds 轮有效源码操作；操作失败单独计数，连续3次或累计10次失败将停止。
 当前阶段：$stage_goal

@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.llm.unified_client import UnifiedLLMClient
+from src.llm.unified_client import LLM_TIMEOUT, UnifiedLLMClient
 from src.llm.diagnostics import response_summary
 
 
@@ -65,8 +65,10 @@ async def test_response_diagnostics_capture_stream_metadata_without_forwarding_c
     stream = DiagnosticStream([])
     client.client.chat.completions.create = AsyncMock(return_value=stream)
     diagnostics = {}
-    response = await client.ainvoke([], 'requested-model', on_response=diagnostics.update, log_context='worktree/fix/3')
+    reasoning = AsyncMock()
+    response = await client.ainvoke([], 'requested-model', on_response=diagnostics.update, log_context='worktree/fix/3', on_reasoning=reasoning)
     assert response.startswith('说明')
+    reasoning.assert_awaited_once_with('private reasoning')
     assert diagnostics['response_id'] == 'response-one'
     assert diagnostics['response_model'] == 'actual-model'
     assert diagnostics['context'] == 'worktree/fix/3'
@@ -102,6 +104,12 @@ async def test_empty_and_truncated_streams_leave_response_diagnostics():
     assert diagnostics['finish_reasons'] == ['length']
     assert diagnostics['error_type'] == 'ValueError'
     stream.close.assert_awaited_once()
+
+
+def test_connect_timeout_survives_a_slow_provider_handshake():
+    client = UnifiedLLMClient(SimpleNamespace(id='test', api_key='key', base_url='http://example'))
+    assert client.client.timeout.connect == LLM_TIMEOUT.connect == 30.0
+    assert client.client.timeout.read == 600.0
 
 
 def test_response_summary_redacts_before_truncating_and_bounds_excerpts():

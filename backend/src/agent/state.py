@@ -8,11 +8,13 @@ class BugFixState(TypedDict):
     # Bug 信息
     bug_id: str
     bug_info: Dict[str, Any]
+    input_snapshot: Dict[str, Any]
     worktree_path: Optional[str]
     repair_branch: Optional[str]
     base_commit: Optional[str]
     fix_summary: Optional[str]
     repair_feedback: Optional[str]
+    previous_attempt: Optional[Dict[str, Any]]
     visual_context: Optional[Dict[str, Any]]
     source_context: Optional[Dict[str, Any]]
 

@@ -8,6 +8,7 @@ import DOMPurify from 'dompurify';
 import { bugService } from '../../services/bugService';
 import type { Bug } from '../../types';
 import { getStatusLabel } from '../../utils/statusLabels';
+import BugSupplementEditor from './BugSupplementEditor';
 
 function descriptionHtml(bug: Bug) {
   const html = DOMPurify.sanitize(bug.description || '', { USE_PROFILES: { html: true }, FORBID_TAGS: ['style', 'form', 'input', 'button'], FORBID_ATTR: ['style'] });
@@ -23,7 +24,9 @@ function descriptionHtml(bug: Bug) {
   return document.body.innerHTML;
 }
 
-export default function BugDetail({ bugId: embeddedBugId, embedded = false }: { bugId?: string; embedded?: boolean } = {}) {
+export default function BugDetail({ bugId: embeddedBugId, embedded = false, onStarted, onDirtyChange }: {
+  bugId?: string; embedded?: boolean; onStarted?: () => void; onDirtyChange?: (dirty: boolean) => void;
+} = {}) {
   const { bugId: routeBugId } = useParams();
   const bugId = embeddedBugId || routeBugId;
   const [bug, setBug] = useState<Bug | null>(null);
@@ -77,6 +80,10 @@ export default function BugDetail({ bugId: embeddedBugId, embedded = false }: { 
           {bug.detail_warning && <Alert type="warning" showIcon message={bug.detail_warning} />}
           {bug.description ? bug.description_format === 'MARKDOWN' || bug.source !== 'yunxiao' ? <div className="rich-description">{bug.description}</div> : <div className="rich-description" onErrorCapture={(event) => { if (event.target instanceof HTMLImageElement || event.target instanceof HTMLMediaElement) setImageError(true); }} dangerouslySetInnerHTML={{ __html: descriptionHtml(bug) }} /> : !bug.detail_warning && <p className="description-empty">暂无描述</p>}
         </section>
+        <BugSupplementEditor key={bug.bug_id} bug={bug} onDirtyChange={onDirtyChange} onStarted={() => {
+          setBug({ ...bug, status: 'analyzing' });
+          onStarted?.();
+        }} />
         {!!bug.attachments?.length && <section className="bug-attachments">
           <h2>附件</h2>
           {bug.attachments.map((attachment) => {

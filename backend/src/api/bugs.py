@@ -5,7 +5,7 @@ import aiosqlite
 import json
 from typing import Optional
 
-from ..models.bug import Bug, BugCreate, BugUpdate, BugListResponse
+from ..models.bug import Bug, BugCreate, BugUpdate, BugListResponse, BugSupplementUpdate
 from ..config import get_settings
 
 router = APIRouter(prefix="/api/bugs", tags=["Bugs"])
@@ -170,6 +170,61 @@ async def get_bug_details(bug_id: str):
         except YunxiaoError as exc:
             result["detail_warning"] = f"云效正文加载失败：{exc}。当前显示本地信息。"
     return result
+
+
+@router.get('/{bug_id}/supplement')
+async def get_bug_supplement(bug_id: str):
+    from ..core.bug_inputs import read_supplement
+    from ..core.image_storage import load_images
+    async with aiosqlite.connect(get_db_path()) as db:
+        if not await (await db.execute('SELECT 1 FROM bugs WHERE bug_id=?', (bug_id,))).fetchone():
+            raise HTTPException(status_code=404, detail='Bug 不存在')
+        supplement = await read_supplement(db, bug_id)
+    images, warning, image_map = [], None, {}
+    for index, name in enumerate(supplement['image_names']):
+        try:
+            image_map[index] = len(images)
+            images.extend(load_images(get_db_path(), [name]))
+        except ValueError:
+            warning = '部分已保存的截图文件缺失，请重新上传后保存。补充说明和其他截图仍可编辑。'
+            image_map[index] = None
+    document = supplement.get('document')
+    if document and warning:
+        from ..core.rich_input import remap_document_images
+        document = remap_document_images(document, image_map)
+    return {'notes': supplement['notes'], 'images': images, 'revision': supplement['revision'],
+            **({'document': document} if document else {}),
+            **({'image_warning': warning} if warning else {})}
+
+
+@router.put('/{bug_id}/supplement')
+async def save_bug_supplement(bug_id: str, request: BugSupplementUpdate):
+    from ..core.bug_inputs import read_supplement
+    from ..core.image_storage import load_images
+    from ..core.rich_input import save_rich_input
+    async with aiosqlite.connect(get_db_path()) as db:
+        await db.execute('BEGIN IMMEDIATE')
+        if not await (await db.execute('SELECT 1 FROM bugs WHERE bug_id=?', (bug_id,))).fetchone():
+            raise HTTPException(status_code=404, detail='Bug 不存在')
+        current = await read_supplement(db, bug_id)
+        if current['revision'] != request.revision:
+            raise HTTPException(status_code=409, detail='补充信息已在其他页面更新，请重新加载后编辑')
+        try:
+            notes, names, document = save_rich_input(get_db_path(), request.notes, request.images, request.document, max_length=12000)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        revision = current['revision']
+        if notes != current['notes'] or names != current['image_names'] or document != current.get('document'):
+            revision += 1
+            await db.execute(
+                'INSERT INTO bug_supplements (bug_id, notes, image_names, revision, document) VALUES (?, ?, ?, ?, ?) '
+                'ON CONFLICT(bug_id) DO UPDATE SET notes=excluded.notes, image_names=excluded.image_names, '
+                'revision=excluded.revision, document=excluded.document, updated_at=CURRENT_TIMESTAMP',
+                (bug_id, notes, json.dumps(names), revision, json.dumps(document, ensure_ascii=False) if document else None),
+            )
+        await db.commit()
+    return {'notes': notes, 'images': load_images(get_db_path(), names), 'revision': revision,
+            **({'document': document} if document else {})}
 
 
 @router.post("", response_model=Bug)

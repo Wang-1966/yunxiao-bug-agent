@@ -44,14 +44,15 @@ Grok Build  = Grok 4.7 + 工具调用
 #### 1. 后端
 ```bash
 cd backend
-pip install -r requirements.txt
+python3.11 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
 
 # 配置环境变量
 export ANTHROPIC_API_KEY="your-claude-api-key"
 export GROK_API_KEY="your-grok-relay-api-key"
 
 # 启动后端
-python -m src.main
+venv/bin/python -m src.main
 # 访问 http://localhost:8000
 ```
 

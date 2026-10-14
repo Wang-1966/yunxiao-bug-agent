@@ -32,6 +32,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    from .core.repair_merge import sweep_orphan_worktrees
+    try:
+        await sweep_orphan_worktrees(settings.database_url.replace("sqlite+aiosqlite:///", ""))
+    except Exception as e:
+        logger.warning(f"Failed to sweep orphan worktrees: {e}")
+
     # 加载 LLM 配置
     try:
         llm_config = load_config()
@@ -51,7 +57,11 @@ async def lifespan(app: FastAPI):
 
     # 关闭时执行
     logger.info("Shutting down application...")
-    await orchestrator.stop()
+    from .core.preview_manager import stop_all
+    try:
+        await orchestrator.stop()
+    finally:
+        await stop_all()
 
 
 app = FastAPI(

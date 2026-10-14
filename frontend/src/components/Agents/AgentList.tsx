@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Table, Tag, Progress, Button, Timeline, message, Modal, Descriptions, Dropdown, Space } from 'antd';
+import { Table, Tag, Progress, Button, message, Modal, Descriptions, Dropdown, Space, Drawer } from 'antd';
 import { PauseCircleOutlined, PlayCircleOutlined, StopOutlined, ReloadOutlined, DeleteOutlined, DownOutlined } from '@ant-design/icons';
 import { agentService } from '../../services/agentService';
 import { bugService } from '../../services/bugService';
 import BugLink from '../Bugs/BugLink';
+import BugDetail from '../Bugs/BugDetail';
 import RepairReview from './RepairReview';
+import AgentTranscript from './AgentTranscript';
 import type { AgentStatus, Bug } from '../../types';
 import { getStatusLabel } from '../../utils/statusLabels';
 
@@ -16,6 +18,8 @@ const AgentList: React.FC = () => {
   const [deletingAgents, setDeletingAgents] = useState<string[]>([]);
   const [stoppingAgents, setStoppingAgents] = useState<string[]>([]);
   const [reviewAgent, setReviewAgent] = useState<string | null>(null);
+  const [detailBugId, setDetailBugId] = useState<string | null>(null);
+  const [detailDirty, setDetailDirty] = useState(false);
 
   useEffect(() => {
     loadAgents();
@@ -111,6 +115,13 @@ const AgentList: React.FC = () => {
     }
   };
 
+  const changeDetails = (bugId: string | null) => {
+    const change = () => { setDetailBugId(bugId); setDetailDirty(false); };
+    if (bugId === detailBugId) return;
+    if (detailDirty) Modal.confirm({ title: '补充信息尚未保存', content: '离开当前 Bug 将丢弃修改。', okText: '丢弃并离开', cancelText: '继续编辑', onOk: change });
+    else change();
+  };
+
   const statusColor = (status: string) => {
     switch (status) {
       case 'busy':
@@ -146,7 +157,11 @@ const AgentList: React.FC = () => {
       title: '当前任务',
       dataIndex: 'current_bug',
       key: 'current_bug',
-      render: (bug: Bug | undefined) => bug ? <BugLink bug={bug} /> : '-',
+      render: (bug: Bug | undefined) => bug ? <BugLink bug={bug} onClick={(event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        changeDetails(bug.bug_id);
+      }} /> : '-',
     },
     {
       title: '当前阶段',
@@ -244,20 +259,14 @@ const AgentList: React.FC = () => {
           { key: 'branch', label: '修复分支', children: record.repair_branch || '可在工作树中查看' },
           { key: 'files', label: '修改文件', children: record.modified_files?.join('、') || '可在工作树中查看 Git diff' },
         ]} />}
-        <h2>最近日志</h2>
-        <Timeline
-          items={record.logs.slice(0, 10).map((log) => ({
-            children: log,
-          }))}
-        />
+        <h2>Agent 过程</h2>
+        <AgentTranscript agentId={record.agent_id} active={record.status === 'busy'} />
       </div>
     );
   };
 
   return (
     <div>
-      <div className="page-heading"><div><div className="page-eyebrow">AGENT MONITOR</div><h1>Agent 状态</h1></div></div>
-
       <section className="data-section">
         <Table
           scroll={{ x: 1070 }}
@@ -272,6 +281,19 @@ const AgentList: React.FC = () => {
           pagination={false}
         />
       </section>
+      <Drawer
+        title="Bug 详情"
+        placement="right"
+        width="min(960px, 100vw)"
+        maskClosable
+        styles={{ mask: { background: 'transparent' } }}
+        rootClassName="bug-detail-drawer"
+        open={detailBugId !== null}
+        onClose={() => changeDetails(null)}
+        destroyOnClose
+      >
+        {detailBugId && <BugDetail bugId={detailBugId} embedded onDirtyChange={setDetailDirty} onStarted={() => void loadAgents()} />}
+      </Drawer>
       <RepairReview agentId={reviewAgent} onClose={() => setReviewAgent(null)} onConfirmed={() => void loadAgents()} />
     </div>
   );

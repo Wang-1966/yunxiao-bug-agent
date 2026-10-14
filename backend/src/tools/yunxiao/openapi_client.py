@@ -1,4 +1,4 @@
-"""Read-only Yunxiao OpenAPI client for bugs assigned to the token owner."""
+"""云效 OpenAPI：同步缺陷及人工验收后的状态更新。"""
 import json
 from urllib.parse import urlparse, quote
 
@@ -45,6 +45,33 @@ class YunxiaoClient:
             if not isinstance(item, dict) or item.get("id") != bug_id or item.get("categoryId") != "Bug":
                 raise YunxiaoError("云效详情返回格式不符合预期")
             return item
+
+    async def set_bug_in_progress(self, bug_id):
+        item = await self.get_bug(bug_id)
+        project_id = (item.get('space') or {}).get('id')
+        type_id = (item.get('workitemType') or {}).get('id')
+        if not project_id or not type_id:
+            raise YunxiaoError('云效缺陷缺少项目或工作项类型，无法解析处理中状态')
+        settings = self.settings
+        root = f"/oapi/v1/projex/organizations/{quote(settings.yunxiao_org_id, safe='')}"
+        async with httpx.AsyncClient(base_url=settings.yunxiao_api_base,
+                                     headers={'x-yunxiao-token': settings.yunxiao_access_token}, timeout=30) as client:
+            path = f"{root}/projects/{quote(project_id, safe='')}/workitemTypes/{quote(type_id, safe='')}/workflows"
+            workflow = self._json(await self._request(client, 'GET', path))
+            statuses = workflow.get('statuses') if isinstance(workflow, dict) else None
+            if not isinstance(statuses, list):
+                raise YunxiaoError('云效工作流状态列表返回格式不符合预期')
+            targets = [s for s in statuses if isinstance(s, dict) and
+                       (s.get('displayName') or s.get('name')) == '处理中' and s.get('id')]
+            if len(targets) != 1:
+                raise YunxiaoError('云效工作流中未找到唯一的“处理中”状态，请检查项目工作流配置')
+            target_id = targets[0]['id']
+            if (item.get('status') or {}).get('id') != target_id:
+                await self._request(client, 'PUT', f"{root}/workitems/{quote(bug_id, safe='')}", json={'status': target_id})
+                item = await self.get_bug(bug_id)
+                if (item.get('status') or {}).get('id') != target_id:
+                    raise YunxiaoError('云效状态更新后尚未确认为“处理中”，请重试同步')
+            return {'status_id': target_id, 'source_status': '处理中'}
 
     async def list_my_bugs(self):
         settings = self.settings
@@ -147,7 +174,7 @@ class YunxiaoClient:
             if error_code == "Forbidden.InvalidUser.UserNotInCurrentOrganization":
                 raise YunxiaoError("当前账号不属于配置的组织，请检查 YUNXIAO_ORG_ID（需要实际组织 ID，而非组织简称）")
             messages = {
-                401: "Token 无效或已过期", 403: "Token 缺少用户或项目工作项只读权限",
+                401: "Token 无效或已过期", 403: "Token 或当前账号缺少工作项读写权限" if method != 'GET' else "Token 缺少用户、项目工作项或工作流读取权限",
                 404: "组织或项目不存在，或当前账号无权访问", 429: "云效请求频率受限，请稍后重试",
             }
             raise YunxiaoError(messages.get(response.status_code, f"云效接口错误（HTTP {response.status_code}）"))

@@ -2,7 +2,7 @@
 
 ## 📋 前提条件
 
-- Python 3.9+
+- Python 3.11+
 - Node.js 18+
 - Git
 - 云效账号和 API Token
@@ -21,6 +21,7 @@ cp .env.example .env
 cd ..
 chmod +x scripts/*.sh
 ./scripts/start.sh
+# 如需指定其他 Python 3.11+ 解释器：BACKEND_PYTHON=/path/to/python ./scripts/start.sh
 ```
 
 ### 方式二：手动启动
@@ -42,15 +43,17 @@ cp .env.example .env
 cd backend
 
 # 创建虚拟环境
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+python3.11 -m venv venv
 
 # 安装依赖
-pip3 install -r requirements.txt
+venv/bin/python -m pip install -r requirements.txt
 
 # 启动服务
-python3 -m src.main
+venv/bin/python -m src.main
 ```
+
+已有虚拟环境若使用 Python 3.9/3.10，请先移走旧 `venv` 再创建。
+Windows 对应使用 `venv\Scripts\python.exe`。
 
 后端将运行在 http://localhost:8000
 

@@ -9,7 +9,10 @@ from ..prompts import render_prompt
 
 def visual_source(bug):
     # 正文变化时重新识别；签名下载 URL 的刷新不影响同一正文的缓存。
-    return hashlib.sha256((bug.get('description') or '').encode()).hexdigest()
+    # 反馈截图变化也要重新识别，否则新增截图没有文字观察。
+    source = [bug.get('description') or '', bug.get('supplement_notes') or '',
+              bug.get('supplement_image_names') or [], bug.get('feedback_image_names') or []]
+    return hashlib.sha256(json.dumps(source, ensure_ascii=False).encode()).hexdigest()
 
 
 async def describe_bug_images(llm, bug):
@@ -20,7 +23,9 @@ async def describe_bug_images(llm, bug):
     messages = [
         {'role': 'system', 'content': prompt},
         {'role': 'user', 'content': [
-            {'type': 'text', 'text': render_prompt('vision_context', title=bug.get('title', ''), description=bug.get('description') or '')},
+            {'type': 'text', 'text': render_prompt('vision_context', title=bug.get('title', ''), description=bug.get('description') or '')
+             + (f"\n修复前补充说明：{bug.get('supplement_notes') or '见截图'}\n编号 {bug['supplement_image_start']} 起的 {len(bug['supplement_image_names'])} 张图片是修复前补充截图。" if bug.get('supplement_image_names') else f"\n修复前补充说明：{bug.get('supplement_notes') or '无'}")
+             + (f"\n编号 {bug['feedback_image_start']} 起的图片是用户验收反馈截图，不属于 Bug 正文。" if bug.get('feedback_image_names') else '')},
             *[{'type': 'image_url', 'image_url': {'url': image}} for image in images],
         ]},
     ]

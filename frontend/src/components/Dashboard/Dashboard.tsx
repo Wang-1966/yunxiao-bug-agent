@@ -95,7 +95,11 @@ const Dashboard: React.FC = () => {
       title: '当前任务',
       dataIndex: 'current_bug',
       key: 'current_bug',
-      render: (bug: Bug | undefined) => bug ? <BugLink bug={bug} /> : '-',
+      render: (bug: Bug | undefined) => bug ? <BugLink bug={bug} onClick={(event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        setDetailBugId(bug.bug_id);
+      }} /> : '-',
     },
     {
       title: '进度',

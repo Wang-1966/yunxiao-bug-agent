@@ -22,6 +22,16 @@ CREATE TABLE IF NOT EXISTS bugs (
     resolved_at TIMESTAMP
 );
 
+-- 本地补充资料，不受云效同步影响
+CREATE TABLE IF NOT EXISTS bug_supplements (
+    bug_id TEXT PRIMARY KEY REFERENCES bugs(bug_id),
+    notes TEXT NOT NULL DEFAULT '',
+    image_names TEXT NOT NULL DEFAULT '[]',
+    document TEXT,
+    revision INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 云效项目与本地修复仓库绑定
 CREATE TABLE IF NOT EXISTS projects (
     project_id TEXT PRIMARY KEY,
@@ -29,6 +39,9 @@ CREATE TABLE IF NOT EXISTS projects (
     repo_path TEXT NOT NULL,
     branch TEXT NOT NULL,
     test_command TEXT NOT NULL DEFAULT '',
+    preview_command TEXT NOT NULL DEFAULT '',
+    preview_env_files TEXT NOT NULL DEFAULT '[]',
+    preview_port INTEGER,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

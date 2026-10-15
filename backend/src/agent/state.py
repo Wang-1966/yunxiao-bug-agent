@@ -39,6 +39,7 @@ class BugFixState(TypedDict):
 
     # 验证结果
     test_results: Dict[str, Any]
+    verify_rounds: Optional[int]
 
     # 用户决策
     waiting_for_user: bool

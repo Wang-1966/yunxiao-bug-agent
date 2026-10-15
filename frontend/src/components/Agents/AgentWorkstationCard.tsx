@@ -15,10 +15,11 @@ import {
 } from '@ant-design/icons';
 import type { AgentStatus, Bug } from '../../types';
 import { getStatusLabel } from '../../utils/statusLabels';
-import { AgentAvatar, resolveAgentPersona } from '../Shared/AgentAvatar';
+import { AgentAvatar, getAgentMood, resolveAgentPersona } from '../Shared/AgentAvatar';
 import { QuestPipeline } from '../Shared/QuestPipeline';
 import BugLink from '../Bugs/BugLink';
 import AgentTranscript from './AgentTranscript';
+import { StageTimings } from './StageTimings';
 
 export interface AgentWorkstationCardProps {
   agent: AgentStatus;
@@ -76,6 +77,7 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
     !compact && (agent.status === 'busy' || agent.status === 'error'),
   );
   const persona = resolveAgentPersona(agent.name);
+  const mood = getAgentMood(agent.status, agent.current_stage);
   const bug = agent.current_bug;
   const isWaitingAction =
     agent.status === 'awaiting_plan_confirmation' || agent.status === 'awaiting_confirmation';
@@ -92,7 +94,7 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
     <article
       className={`workstation-card status-${agent.status} ${isWaitingAction ? 'is-attention' : ''} ${compact ? 'is-compact' : ''}`}
     >
-      {/* 顶部工位铭牌与角色插画 */}
+      {/* 顶部工位铭牌与角色插画（释放横向空间，不内嵌横向气泡） */}
       <div className="workstation-header">
         <div className="workstation-identity">
           <AgentAvatar
@@ -100,20 +102,20 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
             status={agent.status}
             stage={agent.current_stage}
             size={compact ? 'md' : 'lg'}
-            showBubble={!compact}
+            showBubble={false}
           />
           <div className="workstation-meta">
             <div className="workstation-name-row">
               <h3 className="workstation-name">{agent.name}</h3>
+              <Tag color={statusTagColor(agent.status)} className="workstation-status-tag">
+                {getStatusLabel(agent.status)}
+              </Tag>
               <span
                 className="persona-chip"
                 style={{ borderColor: persona.accentColor, color: persona.accentColor }}
               >
                 {persona.accessoryLabel} · {persona.roleTitle}
               </span>
-              <Tag color={statusTagColor(agent.status)} className="workstation-status-tag">
-                {getStatusLabel(agent.status)}
-              </Tag>
             </div>
             <p className="persona-specialty">{persona.specialty}</p>
           </div>
@@ -137,6 +139,16 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
           />
         </div>
       </div>
+
+      {/* 独立通栏心情状态对话条（不挤压标题与简介） */}
+      {!compact && (
+        <div className={`workstation-speech-bar ${mood.moodClass}`}>
+          <span className="speech-bar-emoji" aria-hidden="true">
+            {mood.emoji}
+          </span>
+          <span className="speech-bar-text">{mood.bubbleText}</span>
+        </div>
+      )}
 
       {/* 闯关式五阶段修复流水线 */}
       <QuestPipeline
@@ -191,6 +203,15 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
                 </span>
               )}
             </div>
+
+            {/* 阶段耗时统计 */}
+            {!compact && agent.stage_timings && (
+              <StageTimings
+                timings={agent.stage_timings}
+                currentStage={agent.current_stage}
+                compact={false}
+              />
+            )}
 
             {!compact && (agent.root_cause || agent.error) && (
               <div className={`workstation-insight ${agent.error ? 'is-error' : ''}`}>

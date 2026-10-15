@@ -19,6 +19,7 @@ from ..core.orchestrator import get_orchestrator
 from ..core.agent_stream import live_stream
 from ..core.projects import resolve_project_config, project_configuration_lock
 from ..core.preview_manager import start_preview, stop_preview, preview_status
+from ..core.tool_agent import repair_unicode_escapes
 
 router = APIRouter(prefix="/api/agents", tags=["Agents"])
 settings = get_settings()
@@ -68,6 +69,32 @@ async def list_agents():
                 )
                 log_rows = await log_cursor.fetchall()
                 logs = [row[0] for row in log_rows]
+
+                # 提取阶段耗时统计
+                timing_cursor = await db.execute(
+                    """
+                    SELECT metadata FROM agent_logs
+                    WHERE agent_id = ? AND metadata IS NOT NULL
+                    ORDER BY id
+                    """,
+                    (agent_dict["agent_id"],)
+                )
+                timing_rows = await timing_cursor.fetchall()
+                stage_timings = {}
+                for timing_row in timing_rows:
+                    try:
+                        metadata = json.loads(timing_row[0])
+                        if isinstance(metadata, dict) and 'stage' in metadata and 'duration_seconds' in metadata:
+                            stage = metadata['stage']
+                            duration = metadata['duration_seconds']
+                            # 保留最新的阶段耗时
+                            stage_timings[stage] = duration
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+                # 计算总耗时
+                if stage_timings:
+                    stage_timings['total'] = sum(stage_timings.get(s, 0) for s in ['analyze', 'fix', 'verify'])
                 runtime = get_orchestrator().get_agent_status(agent_dict["agent_id"]) or {}
                 history_cursor = await db.execute('SELECT stage, result FROM task_history WHERE agent_id=? ORDER BY id DESC LIMIT 1', (agent_dict['agent_id'],))
                 history = await history_cursor.fetchone()
@@ -92,15 +119,16 @@ async def list_agents():
                     base_commit=state.get('base_commit'),
                     git_commit_hash=state.get('git_commit_hash'),
                     modified_files=state.get('modified_files', []),
-                    root_cause=state.get('root_cause'),
+                    root_cause=repair_unicode_escapes(state.get('root_cause')),
                     confidence=state.get('confidence'),
-                    analysis=state.get('analysis'),
+                    analysis=repair_unicode_escapes(state.get('analysis')),
                     repro=state.get('repro'),
                     review=state.get('review'),
                     fix_summary=state.get('fix_summary'),
                     test_results=state.get('test_results') or {},
                     error=state.get('error') or runtime.get('error'),
                     confirmation=confirmation,
+                    stage_timings=stage_timings if stage_timings else None,
                 ))
 
             return agents
@@ -304,6 +332,7 @@ async def get_agent_proposal(agent_id: str):
             except (ValueError, OSError):
                 attempt['diff'] = '上一轮提交已不可用，仅能查看改动统计'
         attempt['diff'] = attempt['diff'] or attempt.get('diff_stat') or ''
+    result = repair_unicode_escapes(result)
     return {'status': row['status'], 'previous_attempt': attempt, 'decision_id': row['decision_id'], 'decision_status': row['decision_status'], 'root_cause': result.get('root_cause'), 'confidence': result.get('confidence'), 'analysis': result.get('analysis'), 'repro': result.get('repro'), 'review': result.get('review'), 'proposals': result.get('proposals', []), 'feedback': result.get('repair_feedback', ''), 'user_choice': json.loads(row['user_choice']) if row['user_choice'] else None}
 
 

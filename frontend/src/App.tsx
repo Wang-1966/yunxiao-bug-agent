@@ -9,6 +9,7 @@ import BugDetail from './components/Bugs/BugDetail';
 import AgentList from './components/Agents/AgentList';
 import LLMConfigPage from './components/LLMConfig/LLMConfigPage';
 import ProjectList from './components/Projects/ProjectList';
+import { ConfirmationSettings } from './components/Settings/ConfirmationSettings';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useThemeStore, type UIThemeMode } from './stores/themeStore';
 
@@ -139,6 +140,7 @@ const App: React.FC = () => {
             <Route path="agents" element={<AgentList />} />
             <Route path="projects" element={<ProjectList />} />
             <Route path="llm-config" element={<LLMConfigPage />} />
+            <Route path="confirmation-settings" element={<ConfirmationSettings />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

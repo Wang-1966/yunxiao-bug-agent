@@ -63,6 +63,13 @@ export interface AgentStatus {
   error?: string;
   test_results?: { passed?: boolean; command?: string; exit_code?: number; output?: string };
   confirmation?: { decision_id: string; status: string; user_choice?: { confirmed: boolean; feedback: string; images?: string[]; merge?: { cleanup_pending?: boolean; cleanup_error?: string }; yunxiao_sync?: { status: 'pending' | 'succeeded' | 'failed'; target: string; error?: string } }; answered_at?: string };
+  // 新增：阶段耗时统计
+  stage_timings?: {
+    analyze?: number;    // 分析阶段耗时（秒）
+    fix?: number;        // 修复阶段耗时（秒）
+    verify?: number;     // 验证阶段耗时（秒）
+    total?: number;      // 总耗时（秒）
+  };
 }
 
 export interface AgentTranscriptEntry {

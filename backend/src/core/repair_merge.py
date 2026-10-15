@@ -11,7 +11,7 @@ from ..config import get_settings
 from .repair_executor import git, run_process, REPAIR_BRANCH_PREFIX
 
 
-async def merge_confirmed_repair(*, worktree_path: str, repair_branch: str, repo_path: str, target_branch: str, git_commit_hash: str, base_commit: str):
+async def merge_confirmed_repair(*, worktree_path: str, repair_branch: str, repo_path: str, target_branch: str, git_commit_hash: str, base_commit: str, resolver=None, test_command: str = ''):
     repo = Path(repo_path).expanduser().resolve()
     worktree = Path(worktree_path).expanduser().resolve()
     if not repo.is_dir() or not worktree.is_dir():
@@ -42,22 +42,73 @@ async def merge_confirmed_repair(*, worktree_path: str, repair_branch: str, repo
     # 上次合并已成功但数据库写入中断时，只补记结果，不创建重复合并提交。
     code, _ = await run_process(['git', 'merge-base', '--is-ancestor', git_commit_hash, target_branch], repo)
     if code == 0:
-        return {'merge_commit': await git(repo, 'rev-parse', target_branch), 'target_branch': target_branch, 'git_commit_hash': git_commit_hash}
+        return {'merge_commit': await git(repo, 'rev-parse', target_branch), 'target_branch': target_branch, 'git_commit_hash': git_commit_hash, 'conflict_resolved': False}
     if code != 1:
         raise ValueError('无法检查目标分支的合并状态')
     if await git(repo, 'branch', '--show-current') != target_branch:
         await git(repo, 'switch', target_branch)
+    resolved = False
     try:
         message = f"Merge branch '{repair_branch}' into {target_branch}"
-        await git(repo, '-c', 'user.name=Bug Repair Agent', '-c', 'user.email=bug-agent@localhost', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', 'merge', '--no-ff', '-m', message, git_commit_hash)
+        await _merge_commit(repo, message, git_commit_hash)
     except Exception as exc:
-        # 只撤销本次由系统开始的合并；进入前已要求目标工作树干净。
-        code, _ = await run_process(['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], repo)
-        if code == 0:
-            await git(repo, 'merge', '--abort')
-        raise ValueError(f'合并冲突或 Git 合并失败；Agent 分支和工作树已保留：{exc}')
+        await _abort_merge(repo)
+        try:
+            original = git_commit_hash
+            git_commit_hash = await _integrate_target(worktree, target_branch, resolver or resolve_merge_with_agent)
+            if test_command:
+                code, output = await run_process(['/bin/sh', '-c', test_command], worktree, get_settings().agent_timeout)
+                if code != 0:
+                    await git(worktree, 'reset', '--hard', original)
+                    raise ValueError(f'冲突已解开，但验证命令失败，未写入目标分支：{output[-1500:]}')
+            resolved = True
+        except Exception as resolve_exc:
+            raise ValueError(f'合并冲突或 Git 合并失败；Agent 分支和工作树已保留：{resolve_exc}') from exc
+        await _merge_commit(repo, message, git_commit_hash)
     merge_commit = await git(repo, 'rev-parse', 'HEAD')
-    return {'merge_commit': merge_commit, 'target_branch': target_branch, 'git_commit_hash': git_commit_hash}
+    return {'merge_commit': merge_commit, 'target_branch': target_branch, 'git_commit_hash': git_commit_hash, 'conflict_resolved': resolved}
+
+
+_GIT_USER = ('-c', 'user.name=Bug Repair Agent', '-c', 'user.email=bug-agent@localhost', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false')
+
+
+async def _merge_commit(repo, message, commit):
+    await git(repo, *_GIT_USER, 'merge', '--no-ff', '-m', message, commit)
+
+
+async def _abort_merge(repo):
+    code, _ = await run_process(['git', '-C', str(repo), 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], repo)
+    if code == 0:
+        await git(repo, 'merge', '--abort')
+
+
+async def _integrate_target(worktree, target_branch, resolver):
+    """先把目标分支合进修复工作树。Git 能合上就直接用；有冲突则交给 resolver 改完再完成合并提交。"""
+    code, output = await run_process(['git', '-C', str(worktree), *_GIT_USER, 'merge', '--no-edit', target_branch], worktree)
+    if code == 0:
+        return await git(worktree, 'rev-parse', 'HEAD')
+    try:
+        files = [name for name in (await git(worktree, 'diff', '--name-only', '--diff-filter=U')).splitlines() if name]
+        if not files:
+            raise ValueError(output[-1500:] or '合并失败但没有冲突文件')
+        await resolver(worktree, files)
+        for name in files:
+            path = Path(worktree) / name
+            if path.is_file() and any(mark in path.read_text(encoding='utf-8', errors='replace') for mark in ('<<<<<<<', '>>>>>>>')):
+                raise ValueError(f'{name} 仍包含冲突标记，不能交付')
+        await git(worktree, 'add', '-u', '--', *files)
+        if (await git(worktree, 'diff', '--name-only', '--diff-filter=U')).strip():
+            raise ValueError('仍有未解决的冲突文件')
+        await git(worktree, *_GIT_USER, 'commit', '--no-edit')
+        return await git(worktree, 'rev-parse', 'HEAD')
+    except Exception:
+        await _abort_merge(worktree)
+        raise
+
+
+async def resolve_merge_with_agent(worktree, files):
+    from .repair_agent import run_merge_resolution
+    await run_merge_resolution(worktree, files)
 
 
 BUSY_WORKTREE = '工作树目录仍被进程占用（如在其中运行的 dev server），关闭后重试即可完成清理'

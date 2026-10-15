@@ -510,6 +510,7 @@ a { color: var(--primary); }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
   gap: 20px;
+  align-items: start;
 }
 .workstation-grid.is-compact {
   grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
@@ -770,6 +771,19 @@ a { color: var(--primary); }
   line-height: 1.6;
 }
 .analysis-report p { margin: 0 0 6px; }
+.analysis-brief { margin: 0; }
+.analysis-brief > div {
+  display: grid;
+  grid-template-columns: 4.5em minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.analysis-brief dt { margin: 0; color: var(--muted); font-weight: 600; }
+.analysis-brief dd { margin: 0; white-space: pre-wrap; }
+.analysis-brief .is-open dd { color: #8a5a12; }
+:root[data-theme='cyber'] .analysis-brief .is-open dd { color: #fde68a; }
+.proposal-feedback-note { margin: 6px 0 8px; color: var(--muted); font-size: 13px; }
 .analysis-report ul { margin: 6px 0; padding-left: 18px; }
 .analysis-report-head {
   display: flex;
@@ -933,6 +947,78 @@ a { color: var(--primary); }
 }
 .transcript-assistant { color: var(--text-main); white-space: pre-wrap; overflow-wrap: anywhere; padding: 2px 0; }
 .transcript-note { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+/* 阶段耗时统计 (StageTimings) */
+.stage-timings {
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.stage-timings-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.stage-timings-title {
+  flex: 1;
+}
+.stage-timings-total {
+  font-size: 12px;
+  color: var(--primary);
+  font-weight: 600;
+}
+.stage-timings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stage-timing-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  transition: all 0.2s;
+}
+.stage-timing-item.is-active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.stage-timing-item.has-duration {
+  border-color: var(--border-strong);
+}
+.stage-timing-item.is-pending {
+  opacity: 0.6;
+}
+.stage-timing-label {
+  font-weight: 500;
+  color: var(--text-main);
+}
+.stage-timing-duration {
+  font-weight: 600;
+  color: var(--primary);
+}
+.stage-timing-item.is-active .stage-timing-duration {
+  animation: pulse-timing 1.5s ease-in-out infinite;
+}
+@keyframes pulse-timing {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.timing-chip {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 500;
+}
 .transcript-note.is-warning, .transcript-note.is-warning button { color: #D97706; }
 .transcript-note.is-error { color: #DC2626; padding: 6px 10px; background: rgba(220, 38, 38, 0.1); border-radius: 6px; }
 .transcript-detail {

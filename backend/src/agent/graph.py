@@ -65,8 +65,15 @@ def create_bug_fix_graph(start_node: str = "fetch_bug") -> StateGraph:
     if 'implement_fix' in included:
         workflow.add_conditional_edges('implement_fix', _unless_error('verify_fix'), {END: END, 'verify_fix': 'verify_fix'})
 
-    # 验证完成 -> 结束
-    workflow.add_edge("verify_fix", END)
+    # 验证失败交回修复；通过或连续失败后结束。
+    if 'verify_fix' in included and 'implement_fix' in included:
+        workflow.add_conditional_edges(
+            'verify_fix',
+            lambda state: END if state.get('error') or (state.get('test_results') or {}).get('passed') is True else 'implement_fix',
+            {END: END, 'implement_fix': 'implement_fix'},
+        )
+    elif 'verify_fix' in included:
+        workflow.add_edge('verify_fix', END)
 
 
     logger.info("Bug fix workflow graph created")

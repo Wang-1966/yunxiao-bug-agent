@@ -59,7 +59,8 @@ async def _confirm_repair(db_path, agent_id, confirmation):
                 if not delivery:
                     delivery = {'worktree_path': agent['worktree_path'], 'repair_branch': saved.get('repair_branch', ''),
                                 'repo_path': config['repo_path'], 'target_branch': config['branch'],
-                                'git_commit_hash': commit, 'base_commit': saved['base_commit']}
+                                'git_commit_hash': commit, 'base_commit': saved['base_commit'],
+                                'test_command': config.get('test_command') or ''}
                 if delivery['repo_path'] != config['repo_path'] or delivery['target_branch'] != config['branch']:
                     raise ValueError('交付目标配置已变化，请恢复原配置后重试')
                 saved['delivery'] = delivery
@@ -88,7 +89,7 @@ async def _confirm_repair(db_path, agent_id, confirmation):
                 choice['document'] = document
             status = 'resolved' if confirmation.confirmed else 'failed'
             stage = 'completed' if confirmation.confirmed else 'rejected'
-            message = (f"用户确认 Bug 已修复，已合并到 {merged['target_branch']}（{merged['merge_commit'][:12]}），待清理 Agent 工作树" if confirmation.confirmed else f'用户反馈仍未修复：{feedback or "（见截图）"}{f"（附 {len(images)} 张截图）" if images else ""}')
+            message = (f"用户确认 Bug 已修复，已合并到 {merged['target_branch']}（{merged['merge_commit'][:12]}）" + ('；冲突已自动合并，双方改动都保留' if merged.get('conflict_resolved') else '') + '，待清理 Agent 工作树' if confirmation.confirmed else f'用户反馈仍未修复：{feedback or "（见截图）"}{f"（附 {len(images)} 张截图）" if images else ""}')
             async with aiosqlite.connect(db_path) as db:
                 await db.execute('BEGIN IMMEDIATE')
                 cursor = await db.execute("UPDATE decisions SET status='answered', user_choice=?, answered_at=CURRENT_TIMESTAMP WHERE decision_id=? AND status='delivering'", (json.dumps(choice, ensure_ascii=False), decision['decision_id']))
@@ -114,7 +115,7 @@ async def _confirm_repair(db_path, agent_id, confirmation):
         await _cleanup_rejected_repair(db_path, agent, bug['bug_id'], saved, config)
     else:
         try:
-            await cleanup_confirmed_repair(delivery['worktree_path'], delivery['repair_branch'], delivery['repo_path'], delivery['git_commit_hash'])
+            await cleanup_confirmed_repair(delivery['worktree_path'], delivery['repair_branch'], delivery['repo_path'], merged.get('git_commit_hash') or delivery['git_commit_hash'])
             merged['cleanup_pending'] = False
             merged.pop('cleanup_error', None)
             message = f"代码已合并到 {merged['target_branch']}（{merged['merge_commit'][:12]}），Agent 分支和工作树已清理"

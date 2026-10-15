@@ -1,8 +1,9 @@
-"""分析 / 修复 / 审查三类 Agent 运行：在工具循环之上加入“可验证”的约束。
+"""分析 / 修复 Agent 运行：在工具循环之上加入"可验证"的约束。
 
-- 分析：症状契约 + 多假设 + 失败的复现测试（由系统亲自运行校验）+ 业务源码只读 + 独立对抗审查。
-- 修复：续接分析会话；复现测试受保护；提交时系统重新运行复现命令；改动再经审查。
-- 置信度由证据决定，而不是模型自评。
+- 分析：症状契约 + 多假设 + 失败的复现测试（由系统亲自运行校验）+ 业务源码只读。
+- 修复：续接分析会话；复现测试受保护；提交时系统重新运行复现命令。
+- 置信度由证据决定：复现测试通过 = high，否则 = medium。
+- 验证依赖工具（测试运行、编译检查）而非 LLM 审查，提升效率和可靠性。
 """
 import hashlib
 import json
@@ -20,8 +21,6 @@ from .browser_tool import close_browser
 from .repair_executor import changed_files, git
 from .tool_agent import load_session, run_tool_agent, save_session, session_path, submit_tool
 
-MAX_REVIEW_ROUNDS = 2
-REVIEW_MAX_TURNS = 40
 REPRO_TIMEOUT = 600
 MAX_DIFF_CHARS = 40_000
 MAX_NEW_FILE_CHARS = 6_000
@@ -69,52 +68,6 @@ def system_prompt(editor='edit_file', browser=False) -> str:
 
 def new_session(user_prompt: str, extra_system: str = '', *, editor='edit_file', browser=False) -> list:
     return [{'role': 'system', 'content': system_prompt(editor, browser) + extra_system}, {'role': 'user', 'content': user_prompt}]
-
-
-# ---------------- 审查 ----------------
-
-def _review_tool():
-    async def validate(args):
-        refuted = args.get('refuted')
-        if type(refuted) is not bool:
-            raise ToolError('refuted 必须是布尔值')
-        summary = _text(args.get('summary'), 'summary')
-        findings = args.get('findings') or []
-        if not isinstance(findings, list) or not all(isinstance(f, dict) and f.get('location') and f.get('detail') for f in findings):
-            raise ToolError('findings 的每一项都需要 location 与 detail')
-        if refuted and not findings:
-            raise ToolError('判定 refuted=true 时必须给出具体问题 findings（location + detail），让工程师能直接修正')
-        return {'refuted': refuted, 'summary': summary, 'findings': [{'location': str(f['location']), 'detail': str(f['detail'])} for f in findings]}
-
-    return submit_tool(
-        'submit_review', '提交审查结论。refuted=true 表示结论/改动不成立，必须附 findings。',
-        {'type': 'object', 'properties': {
-            'refuted': {'type': 'boolean'}, 'summary': {'type': 'string', 'description': '一句话总结证据'},
-            'findings': {'type': 'array', 'items': {'type': 'object', 'properties': {'location': {'type': 'string'}, 'detail': {'type': 'string'}}, 'required': ['location', 'detail']}}},
-         'required': ['refuted', 'summary']}, validate)
-
-
-async def run_review(llm, worktree, prompt, *, images=None, on_operation=None, stream=None, deadline=None, log_context='review'):
-    """全新上下文、只读工具；审查失败不阻断流程，但不会提高置信度。"""
-    workspace = Workspace(worktree, mode='read')
-    tools = build_tools(workspace, commands=False, images=images) + [_review_tool()]
-    messages = [{'role': 'system', 'content': render_prompt('review_system')}, {'role': 'user', 'content': prompt}]
-    try:
-        _, review = await run_tool_agent(llm, messages, tools, max_turns=REVIEW_MAX_TURNS, on_operation=on_operation, stream=stream, deadline=deadline, log_context=log_context, workspace=workspace)
-    except ValueError as exc:
-        logger.warning(f'审查未能完成：{exc}')
-        if on_operation:
-            await on_operation(f'审查员未能完成审查（不影响流程，但不提高置信度）：{str(exc)[:300]}')
-        return {'status': 'skipped', 'refuted': False, 'summary': str(exc)[:300], 'findings': []}
-    review['status'] = 'refuted' if review['refuted'] else 'passed'
-    if on_operation:
-        detail = '；'.join(f"{f['location']}：{f['detail']}" for f in review['findings'])
-        await on_operation(f"审查员{'未通过' if review['refuted'] else '通过'}（{log_context}）：{review['summary']}" + (f'；{detail}' if detail else ''))
-    return review
-
-
-def _gaps(review) -> str:
-    return '\n'.join(f"- {f['location']}：{f['detail']}" for f in review['findings']) or '无'
 
 
 # ---------------- 分析 ----------------
@@ -198,8 +151,8 @@ def _analysis_tool(workspace, worktree, holder):
          'required': ['symptom', 'hypotheses', 'root_cause', 'reproduction', 'proposals']}, validate)
 
 
-def compose_report(analysis, repro, review) -> str:
-    """面向人阅读的分析报告，作为 root_cause 展示与注入下游提示词。"""
+def compose_report_simple(analysis, repro) -> str:
+    """简化版分析报告，不包含审查信息。"""
     s = analysis['symptom']
     lines = [f"症状理解：期望 {s['expected']}；实际 {s['actual']}", '验收标准：' + '；'.join(s['acceptance'])]
     if analysis['open_questions']:
@@ -209,19 +162,12 @@ def compose_report(analysis, repro, review) -> str:
         lines.append('触发路径：' + '；'.join(analysis['trigger_paths']))
     lines.append('假设排查：' + '；'.join(f"[{'已证实' if h['status'] == 'confirmed' else '已排除'}] {h['description']}（{h['evidence']}）" for h in analysis['hypotheses']))
     lines.append(f"复现：{repro['command']}（修复前失败，退出码 {repro['exit_before']}）" if repro['reproduced'] else f"未能自动复现：{repro['not_reproducible_reason']}")
-    if review.get('status') == 'refuted':
-        lines.append('⚠ 审查员仍不认可该结论：' + '；'.join(f"{f['location']}：{f['detail']}" for f in review['findings']))
-    elif review.get('status') == 'skipped':
-        lines.append('审查未完成：' + review.get('summary', ''))
     return '\n'.join(lines)
 
 
-def confidence_of(repro, review) -> str:
-    if review.get('status') == 'refuted':
-        return 'low'
-    if review.get('status') == 'passed':
-        return 'high' if repro['reproduced'] else 'medium'
-    return 'medium' if repro['reproduced'] else 'low'
+def compose_report(analysis, repro, review) -> str:
+    """保留原函数以向后兼容，但不再依赖 review。"""
+    return compose_report_simple(analysis, repro)
 
 
 def _editor(llm) -> str:
@@ -229,6 +175,10 @@ def _editor(llm) -> str:
 
 
 async def run_analysis(llm, reviewer, worktree, prompt, *, bug, visual='', images=None, previous_attempt=None, on_operation=None, stream=None, preview=None):
+    """执行根因分析，依赖工具验证而非 LLM 审查。
+
+    保留 reviewer 参数以保持向后兼容，但不再使用。
+    """
     deadline = time.monotonic() + get_settings().agent_timeout
     workspace = Workspace(worktree, mode='analyze', deny_read=protected_dirs())
     holder = {}
@@ -240,24 +190,36 @@ async def run_analysis(llm, reviewer, worktree, prompt, *, bug, visual='', image
             return await previous_diff(worktree, previous_attempt, path, offset)
     editor = _editor(llm)
     tools = build_tools(workspace, commands=sandbox_available(), images=images, previous=previous, editor=editor, preview=preview) + [_analysis_tool(workspace, worktree, holder)]
-    messages = new_session(prompt, editor=editor, browser=bool(preview))
-    review, prior = {}, '无'
+
+    # 增强系统提示：强调自我检查和工具验证
+    extra_system = '\n\n重要：提交前请自我检查：\n- 复现测试是否真的失败？\n- 根因定位是否有源码证据支持？\n- 多个假设是否都经过验证？\n- 不确定的地方是否标注在 open_questions 中？'
+    messages = new_session(prompt + extra_system, editor=editor, browser=bool(preview))
+
     try:
-        for round_ in range(1, MAX_REVIEW_ROUNDS + 2):
-            await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='analyze', workspace=workspace)
-            analysis, repro = holder['analysis'], holder['repro']
-            review_prompt = render_prompt('review_analysis', title=bug.get('title') or '', description=bug.get('description') or '', feedback=bug.get('feedback') or '无',
-                                          visual=visual or '无', previous_attempt=bug.get('previous_attempt') or '无', analysis=json.dumps(analysis, ensure_ascii=False, indent=1),
-                                          repro_result=_repro_text(repro), prior_gaps=prior)
-            review = await run_review(reviewer, worktree, review_prompt, images=images, on_operation=on_operation, stream=stream, deadline=deadline, log_context=f'review/analysis/{round_}')
-            if not review['refuted'] or round_ > MAX_REVIEW_ROUNDS:
-                break
-            prior = _gaps(review)
-            messages.append({'role': 'user', 'content': '独立审查员未认可你的分析，指出以下问题。请逐条核对源码（必要时补充测试或修正复现），解决后重新调用 submit_analysis；若你认为审查有误，在回复中给出具体证据。\n' + prior})
+        # 直接运行一次，依赖工具验证和自我检查
+        await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='analyze', workspace=workspace)
+        analysis, repro = holder['analysis'], holder['repro']
+
+        # 简化的置信度评估：只看是否有复现测试
+        confidence = 'high' if repro.get('reproduced') else 'medium'
+
+        # 生成报告（不再包含 review 信息）
+        root_cause = compose_report_simple(analysis, repro)
+
         save_session(session_path(worktree), messages)
-        return {'analysis': analysis, 'repro': repro, 'review': review, 'root_cause': compose_report(analysis, repro, review),
-                'confidence': confidence_of(repro, review), 'proposals': analysis['proposals'],
-                'source_context': {'reads': workspace.read_requests[-MAX_CONTEXT_READS:]}}
+
+        if on_operation:
+            await on_operation(f"分析完成，置信度：{confidence}，{'已复现' if repro.get('reproduced') else '未能自动复现'}")
+
+        return {
+            'analysis': analysis,
+            'repro': repro,
+            'review': {'status': 'skipped', 'refuted': False, 'summary': '已改为工具验证模式'},
+            'root_cause': root_cause,
+            'confidence': confidence,
+            'proposals': analysis['proposals'],
+            'source_context': {'reads': workspace.read_requests[-MAX_CONTEXT_READS:]}
+        }
     finally:
         await close_browser(worktree)
 
@@ -309,7 +271,46 @@ def _fix_tool(workspace, worktree, repro, holder):
                        {'type': 'object', 'properties': {'summary': {'type': 'string', 'description': '实际修改了什么、为什么能消除症状、运行了哪些验证'}}, 'required': ['summary']}, validate)
 
 
+async def run_merge_resolution(worktree, files, llm=None):
+    """冲突文件里同时保留目标分支已有功能和本次修复。由调用方完成 git 提交。"""
+    from ..llm.factory import LLMFactory
+    llm = llm or LLMFactory.create(stage='fix')
+    workspace = Workspace(worktree, mode='fix')
+    listed = '\n'.join(files)
+
+    async def validate(args):
+        summary = _text(args.get('summary'), 'summary')
+        pending = [name for name in (await git(worktree, 'diff', '--name-only', '--diff-filter=U')).splitlines() if name]
+        if pending:
+            raise ToolError('还有未解决的冲突：' + '、'.join(pending))
+        for name in files:
+            path = Path(worktree) / name
+            if path.is_file() and any(mark in path.read_text(encoding='utf-8', errors='replace') for mark in ('<<<<<<<', '>>>>>>>')):
+                raise ToolError(f'{name} 仍有冲突标记')
+        return {'summary': summary}
+
+    editor = _editor(llm)
+    tools = build_tools(workspace, commands=sandbox_available(), editor=editor) + [
+        submit_tool('submit_merge', '冲突已解决并保留双方功能时提交。系统会检查冲突标记并完成合并提交。',
+                     {'type': 'object', 'properties': {'summary': {'type': 'string', 'description': '双方分别保留了什么'}}, 'required': ['summary']}, validate)]
+    prompt = (
+        '把目标分支合并进当前修复时发生冲突。冲突文件：\n' + listed +
+        '\n\n请先 read_file 这些文件。冲突标记 <<<<<<< ======= >>>>>>> 之间，上面是本次修复，下面是目标分支已有改动。'
+        '编辑文件去掉标记，两边的功能都要留下，不能只保留一边。完成后调用 submit_merge。不要执行 git commit。'
+    )
+    messages = [{'role': 'system', 'content': '你只负责解决合并冲突，保留双方已有功能。阶段结束必须调用 submit_merge。'},
+                {'role': 'user', 'content': prompt}]
+    try:
+        await run_tool_agent(llm, messages, tools, max_turns=30, log_context='merge', workspace=workspace)
+    finally:
+        await close_browser(worktree)
+
+
 async def run_fix(llm, reviewer, worktree, prompt, *, bug, analysis, repro, visual='', images=None, previous_attempt=None, instructions='', on_operation=None, stream=None, preview=None):
+    """执行修复，依赖工具验证而非 LLM 审查。
+
+    保留 reviewer 参数以保持向后兼容，但不再使用。
+    """
     deadline = time.monotonic() + get_settings().agent_timeout
     repro = repro or {'command': None, 'test_files': [], 'hashes': {}, 'reproduced': False}
     workspace = Workspace(worktree, mode='fix', protected=set(repro.get('test_files') or []), deny_read=protected_dirs())
@@ -324,28 +325,32 @@ async def run_fix(llm, reviewer, worktree, prompt, *, bug, analysis, repro, visu
     tools = build_tools(workspace, commands=sandbox_available(), images=images, previous=previous, editor=editor, preview=preview) + [_fix_tool(workspace, worktree, repro, holder)]
     path = session_path(worktree)
     messages = load_session(path)
+
+    # 增强提示：强调测试验证和自我检查
+    extra_instructions = '\n\n重要：\n- 修改代码后立即运行相关测试验证\n- 确保复现测试能通过\n- 不确定时用 run_command 运行测试检查\n- 提交前确认所有改动都是必要的'
+
     if messages:
-        messages.append({'role': 'user', 'content': prompt})
+        messages.append({'role': 'user', 'content': prompt + extra_instructions})
     else:
-        messages = new_session(prompt + ('\n\n仓库约束（AGENTS.md）：\n' + instructions if instructions else ''), editor=editor, browser=bool(preview))
-    review, prior = {}, '无'
-    symptom = json.dumps((analysis or {}).get('symptom') or {}, ensure_ascii=False, indent=1)
+        full_prompt = prompt + ('\n\n仓库约束（AGENTS.md）：\n' + instructions if instructions else '') + extra_instructions
+        messages = new_session(full_prompt, editor=editor, browser=bool(preview))
+
     try:
-        for round_ in range(1, MAX_REVIEW_ROUNDS + 2):
-            await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='fix', workspace=workspace)
-            review_prompt = render_prompt('review_fix', title=bug.get('title') or '', description=bug.get('description') or '', feedback=bug.get('feedback') or '无', symptom=symptom,
-                                          analysis=json.dumps({k: (analysis or {}).get(k) for k in ('root_cause', 'trigger_paths', 'proposals')}, ensure_ascii=False, indent=1),
-                                          summary=holder['summary'], files=', '.join(await changed_files(worktree)), diff=await _diff_text(worktree),
-                                          repro_result=_repro_text(holder['repro']), prior_gaps=prior)
-            review = await run_review(reviewer, worktree, review_prompt, images=images, on_operation=on_operation, stream=stream, deadline=deadline, log_context=f'review/fix/{round_}')
-            if not review['refuted'] or round_ > MAX_REVIEW_ROUNDS:
-                break
-            prior = _gaps(review)
-            messages.append({'role': 'user', 'content': '独立审查员认为改动还不成立，指出以下问题。请逐条核对当前源码并修正，解决后重新调用 submit_fix；若你认为审查有误，在回复中给出具体证据。\n' + prior})
+        # 直接运行一次，依赖工具验证
+        await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='fix', workspace=workspace)
+
         save_session(path, messages)
         summary = holder['summary']
-        if review.get('status') == 'refuted':
-            summary += '\n⚠ 审查员仍不认可：' + '；'.join(f"{f['location']}：{f['detail']}" for f in review['findings'])
-        return {'summary': summary, 'review': review, 'repro': holder['repro'], 'source_context': {'reads': workspace.read_requests[-MAX_CONTEXT_READS:]}}
+
+        if on_operation:
+            files = await changed_files(worktree)
+            await on_operation(f"修复完成，已修改 {len(files)} 个文件，{'复现测试通过' if repro.get('reproduced') and holder['repro'].get('exit_after') == 0 else '准备验证'}")
+
+        return {
+            'summary': summary,
+            'review': {'status': 'skipped', 'refuted': False, 'summary': '已改为工具验证模式'},
+            'repro': holder['repro'],
+            'source_context': {'reads': workspace.read_requests[-MAX_CONTEXT_READS:]}
+        }
     finally:
         await close_browser(worktree)

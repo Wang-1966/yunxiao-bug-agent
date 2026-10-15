@@ -8,6 +8,7 @@ import {
   SettingOutlined,
   FolderOutlined,
   ThunderboltOutlined,
+  SafetyOutlined,
 } from '@ant-design/icons';
 import { UI_THEMES, useThemeStore, type UIThemeMode } from '../../stores/themeStore';
 
@@ -46,6 +47,11 @@ const AppLayout: React.FC = () => {
       icon: <SettingOutlined />,
       label: '模型与通用配置',
     },
+    {
+      key: '/confirmation-settings',
+      icon: <SafetyOutlined />,
+      label: '方案确认策略',
+    },
   ];
 
   return (
@@ -61,7 +67,7 @@ const AppLayout: React.FC = () => {
               <span className="brand-spark">✦</span>
             </div>
             <div>
-              <div className="brand-name">云效 Bug Agent</div>
+              <div className="brand-name">Self-Healing Agent Yunxiao</div>
               <div className="brand-caption">Multi-Agent 悬赏修复台</div>
             </div>
           </div>
@@ -85,7 +91,7 @@ const AppLayout: React.FC = () => {
           </div>
 
           <div className="sidebar-footer">
-            <strong>云效 Bug 修复 Agent</strong>
+            <strong>Self-Healing Agent Yunxiao</strong>
             <span>{currentTheme.name} · v1.0.0</span>
           </div>
         </div>

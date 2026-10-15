@@ -546,6 +546,23 @@ async def test_empty_rejection_and_running_task_cannot_resolve_bug(task_db, tmp_
 
 
 @pytest.mark.asyncio
+async def test_verify_failure_goes_back_to_the_fixer(monkeypatch):
+    from src.agent import nodes
+
+    async def fail(*args, **kwargs):
+        return {'test_results': {'passed': False, 'exit_code': 2, 'command': 'git diff --check', 'output': 'src/main.scss:659: new blank line at EOF.\n'}}
+
+    monkeypatch.setattr(nodes, 'verify_and_commit_repair', fail)
+    state = {'bug_id': 'one', 'worktree_path': '/tmp', 'repair_branch': 'b', 'base_commit': 'abc', 'bug_info': {'title': 't', 'test_command': 'true'}, 'repro': {}}
+    first = await nodes.verify_fix_node(state)
+    assert first.get('error') is None
+    assert first['stage'] == 'fixing'
+    assert 'new blank line at EOF' in first['retry_context']
+    stopped = await nodes.verify_fix_node({**state, 'verify_rounds': nodes.MAX_VERIFY_ROUNDS - 1})
+    assert 'new blank line at EOF' in stopped['error']
+
+
+@pytest.mark.asyncio
 async def test_real_failed_command_cannot_publish_a_confirmation(task_db, tmp_path, monkeypatch):
     runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch, f"{sys.executable} -c 'raise SystemExit(2)'")
     with patch.object(agents, 'get_orchestrator', return_value=runner):
@@ -665,6 +682,28 @@ async def test_cleanup_retry_removes_cache_left_by_running_dev_server(task_db, t
         assert result['merge']['cleanup_pending'] is False
         assert not worktree.exists()
         assert not subprocess.check_output(['git', '-C', str(repo), 'branch', '--list', 'bug-agent/*', 'agentfix/*']).strip()
+
+
+@pytest.mark.asyncio
+async def test_merge_conflict_keeps_both_sides_when_resolver_edits(task_db, tmp_path, monkeypatch):
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    repo = tmp_path / 'source'
+    (repo / 'app.py').write_text('value = 99\n')
+    subprocess.run(['git', '-C', str(repo), 'add', 'app.py'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'conflict'], check=True, capture_output=True)
+
+    async def resolver(worktree, files):
+        assert 'app.py' in files
+        (Path(worktree) / 'app.py').write_text('value = 2\nassert value == 2\nvalue_from_target = 99\n')
+
+    with patch.object(agents, 'get_orchestrator', return_value=runner), \
+         patch('src.core.repair_merge.resolve_merge_with_agent', side_effect=resolver):
+        result = await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True))
+    text = (repo / 'app.py').read_text()
+    assert result['merge']['conflict_resolved'] is True
+    assert 'value = 2' in text and 'value_from_target = 99' in text
+    assert '<<<<<<<' not in text
+    assert subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain']).decode() == ''
 
 
 @pytest.mark.asyncio

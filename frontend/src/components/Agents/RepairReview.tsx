@@ -54,22 +54,11 @@ function AnalysisReportView({
   const symptom = analysis?.symptom;
   if (!symptom) return null;
   const label = confidenceLabel(confidence);
-  return (
-    <section className="analysis-report">
-      <div className="analysis-report-head">
-        <span>症状与证据</span>
-        {label && <span className={`confidence-pill is-${confidence}`}>{label}</span>}
-      </div>
-      <p>
-        <strong>期望</strong> {symptom.expected || '-'}
-      </p>
-      <p>
-        <strong>实际</strong> {symptom.actual || '-'}
-      </p>
+  const questions = analysis?.open_questions || [];
+  const details = (
+    <>
       {!!symptom.steps?.length && <p>复现步骤：{symptom.steps.join(' → ')}</p>}
       {!!symptom.acceptance?.length && <p>验收：{symptom.acceptance.join('；')}</p>}
-      {!!analysis?.open_questions?.length && <p>待确认：{analysis.open_questions.join('；')}</p>}
-      {analysis?.root_cause && <p>根因：{analysis.root_cause}</p>}
       {!!analysis?.trigger_paths?.length && <p>触发路径：{analysis.trigger_paths.join('；')}</p>}
       {!!analysis?.hypotheses?.length && (
         <ul>
@@ -94,6 +83,33 @@ function AnalysisReportView({
         </p>
       )}
       {review?.status === 'passed' && <p>审查通过{review.summary ? `：${review.summary}` : ''}</p>}
+    </>
+  );
+  return (
+    <section className="analysis-report">
+      <div className="analysis-report-head">
+        <span>请核对</span>
+        {label && <span className={`confidence-pill is-${confidence}`}>{label}</span>}
+      </div>
+      <dl className="analysis-brief">
+        <div>
+          <dt>期望</dt>
+          <dd>{symptom.expected || '-'}</dd>
+        </div>
+        <div>
+          <dt>实际</dt>
+          <dd>{symptom.actual || '-'}</dd>
+        </div>
+        <div>
+          <dt>根因</dt>
+          <dd>{analysis?.root_cause || '-'}</dd>
+        </div>
+        <div className={questions.length ? 'is-open' : ''}>
+          <dt>待确认</dt>
+          <dd>{questions.length ? questions.join('；') : '无'}</dd>
+        </div>
+      </dl>
+      <Collapse size="small" items={[{ key: 'detail', label: '排查细节', children: details }]} />
     </section>
   );
 }
@@ -160,6 +176,8 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
     agent.current_bug?.assigned_agent_id === agent.agent_id;
   const canConfirmProposal =
     agent?.status === 'awaiting_plan_confirmation' && proposal?.decision_status === 'pending';
+  const openQuestions: string[] = proposal?.analysis?.open_questions || [];
+  const needsAnswer = canConfirmProposal && openQuestions.length > 0;
   const canRetryCleanup =
     agent?.confirmation?.user_choice?.confirmed &&
     agent.confirmation.user_choice.merge?.cleanup_pending;
@@ -250,6 +268,29 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
   };
 
   const persona = agent ? resolveAgentPersona(agent.name) : null;
+  const proposalCards = (
+    <Radio.Group
+      value={proposalIndex}
+      onChange={(event) => setProposalIndex(event.target.value)}
+      className="proposal-cards"
+    >
+      {(proposal?.proposals || []).map((item: any, index: number) => (
+        <div
+          key={index}
+          className={`proposal-option-card ${proposalIndex === index ? 'is-selected' : ''}`}
+          onClick={() => setProposalIndex(index)}
+        >
+          <Radio value={index}>
+            <strong>{item.name || `方案 ${index + 1}`}</strong>
+            <div className="proposal-option-meta">{item.steps?.join('；')}</div>
+            <div className="proposal-option-meta">
+              优点：{item.pros?.join('；') || '-'}；风险：{item.risks || '-'}
+            </div>
+          </Radio>
+        </div>
+      ))}
+    </Radio.Group>
+  );
 
   return (
     <Modal
@@ -289,7 +330,22 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
               重试同步云效状态
             </Button>
           )}
-          {canConfirmProposal && (
+          {needsAnswer && (
+            <>
+              <Button loading={saving} disabled={reading || hasFeedback} onClick={() => void confirmProposal()}>
+                先不回答，按暂定方案修复
+              </Button>
+              <Button
+                type="primary"
+                loading={saving}
+                disabled={reading || !hasFeedback}
+                onClick={() => void confirmProposal()}
+              >
+                提交回答并重新分析
+              </Button>
+            </>
+          )}
+          {canConfirmProposal && !needsAnswer && (
             <Button
               type="primary"
               loading={saving}
@@ -364,11 +420,13 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
               <Alert
                 type="warning"
                 showIcon
-                message="Agent 已完成根因分析，请先确认修复方案"
+                message={needsAnswer ? '有待确认，请先回答再决定方案' : 'Agent 已完成根因分析，请先确认修复方案'}
                 description={
-                  proposal?.analysis?.symptom
-                    ? '请核对下面的症状、证据和审查结论，再选择方案。'
-                    : proposal?.root_cause || agent.root_cause || '请审查分析依据后选择方案。'
+                  needsAnswer
+                    ? '下面的方案还依赖这些未决问题，现在确认不会开始改代码。回答后会重新分析，再给你一份方案。'
+                    : proposal?.analysis?.symptom
+                      ? '先看期望、实际、根因和待确认。其余排查过程在「排查细节」里。'
+                      : proposal?.root_cause || agent.root_cause || '请审查分析依据后选择方案。'
                 }
               />
               <AnalysisReportView
@@ -439,27 +497,15 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
                   style={{ marginTop: 12 }}
                 />
               )}
-              <Radio.Group
-                value={proposalIndex}
-                onChange={(event) => setProposalIndex(event.target.value)}
-                className="proposal-cards"
-              >
-                {(proposal?.proposals || []).map((item: any, index: number) => (
-                  <div
-                    key={index}
-                    className={`proposal-option-card ${proposalIndex === index ? 'is-selected' : ''}`}
-                    onClick={() => setProposalIndex(index)}
-                  >
-                    <Radio value={index}>
-                      <strong>{item.name || `方案 ${index + 1}`}</strong>
-                      <div className="proposal-option-meta">{item.steps?.join('；')}</div>
-                      <div className="proposal-option-meta">
-                        优点：{item.pros?.join('；') || '-'}；风险：{item.risks || '-'}
-                      </div>
-                    </Radio>
-                  </div>
-                ))}
-              </Radio.Group>
+              {needsAnswer ? (
+                <Collapse
+                  size="small"
+                  style={{ marginTop: 12 }}
+                  items={[{ key: 'draft', label: '暂定方案（回答待确认之前不会按它改代码）', children: proposalCards }]}
+                />
+              ) : (
+                proposalCards
+              )}
             </>
           )}
           {agent.error && <Alert type="error" showIcon message={agent.error} />}
@@ -496,6 +542,7 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
               }
             />
           )}
+          {!canConfirmProposal && (
           <Descriptions
             column={1}
             style={{ marginTop: 16 }}
@@ -528,6 +575,8 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
               },
             ]}
           />
+          )}
+          {!canConfirmProposal && (
           <Tabs
             items={[
               {
@@ -565,13 +614,25 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
               },
             ]}
           />
+          )}
           {(canConfirm || canConfirmProposal) && (
             <div>
               <label htmlFor="repair-feedback">
-                {canConfirmProposal
-                  ? '补充或纠正问题理解（填写后将重新分析，生成新方案再次等待确认）'
-                  : '验收反馈（选择“仍未修复”时必填，可直接粘贴截图）'}
+                {needsAnswer
+                  ? '回答待确认'
+                  : canConfirmProposal
+                    ? '补充或纠正问题理解'
+                    : '验收反馈（选择“仍未修复”时必填，可直接粘贴截图）'}
               </label>
+              {canConfirmProposal && (
+                <p className="proposal-feedback-note">
+                  {needsAnswer
+                    ? '请直接回答上面的待确认。提交后重新分析，再给你确认方案；留空不能开始改代码。'
+                    : hasFeedback
+                      ? '框里已有内容。提交后会重新分析并生成新方案，再次等你确认，不会直接改代码。'
+                      : '框里留空再确认，会按当前方案直接改代码。'}
+                </p>
+              )}
               <RichInput
                 id="repair-feedback"
                 value={feedback}
@@ -580,9 +641,11 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
                 onBusyChange={setReading}
                 maxLength={4000}
                 placeholder={
-                  canConfirmProposal
-                    ? '指出理解偏差、补充复现步骤或修复要求，截图直接粘贴在这里…'
-                    : '描述仍存在的现象或验收结果，截图直接粘贴在这里…'
+                  needsAnswer
+                    ? '逐条回答上面的待确认…'
+                    : canConfirmProposal
+                      ? '指出理解偏差、补充复现步骤或修复要求，截图直接粘贴在这里…'
+                      : '描述仍存在的现象或验收结果，截图直接粘贴在这里…'
                 }
               />
             </div>

@@ -344,7 +344,10 @@ class MultiAgentOrchestrator:
                     elif 'implement_fix' in output:
                         message = f"已修改文件：{', '.join(state.get('modified_files', []))}；开始验证"
                     elif 'verify_fix' in output:
-                        message = f"验证命令通过：{state.get('test_results', {}).get('command')}"
+                        if state.get('test_results', {}).get('passed') is True:
+                            message = f"验证命令通过：{state.get('test_results', {}).get('command')}"
+                        else:
+                            message = f"验证未通过，交回修复：{(state.get('retry_context') or '')[:300]}"
                     await self._save_status(agent_id, task, "busy", bug_status, message)
 
             state = self.agent_states[agent_id]['state']

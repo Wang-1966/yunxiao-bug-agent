@@ -4,6 +4,7 @@
 """
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -19,7 +20,31 @@ MAX_TURNS = 80
 REQUEST_TIMEOUT = 300
 MAX_IDLE_TURNS = 3
 MAX_FAILED_TURNS = 6
-MAX_REQUEST_TIMEOUTS = 2
+MAX_REQUEST_TIMEOUTS = 6
+
+
+def retryable_request_error(exc: BaseException) -> bool:
+    """中转站掐断流式响应或超时可以原样重试；模型自己的内容错误不能。"""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    if isinstance(exc, (ValueError, ToolError, KeyError, TypeError)):
+        return False
+    text = str(exc).lower()
+    names = {
+        'RemoteProtocolError', 'ReadError', 'ConnectError', 'ConnectTimeout', 'ReadTimeout',
+        'APIConnectionError', 'APITimeoutError', 'NetworkError',
+    }
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ in names:
+            return True
+        current = current.__cause__ or current.__context__
+    return any(token in text for token in (
+        'incomplete chunked read', 'peer closed connection', 'connection reset',
+        'server disconnected', 'unexpected eof',
+    ))
 WARN_REMAINING_TURNS = 5
 # 只在接近上限时一次性压缩，平时历史只追加，保持提示词缓存命中。
 COMPACT_TRIGGER_CHARS = 300_000
@@ -27,6 +52,18 @@ COMPACT_TARGET_CHARS = 150_000
 COMPACT_KEEP_RECENT = 6
 COMPACT_MIN_OUTPUT = 1000
 MAX_TOOL_RESULT_CHARS = 120_000
+_UNICODE_ESCAPE = re.compile(r'\\u([0-9a-fA-F]{4})')
+
+
+def repair_unicode_escapes(value):
+    """把工具参数里被多转义一次的 \\uXXXX 还原成字符。正常中文不含这个序列。"""
+    if isinstance(value, str):
+        return _UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), value) if '\\u' in value else value
+    if isinstance(value, list):
+        return [repair_unicode_escapes(item) for item in value]
+    if isinstance(value, dict):
+        return {key: repair_unicode_escapes(item) for key, item in value.items()}
+    return value
 
 
 def message_chars(message) -> int:
@@ -159,13 +196,15 @@ async def run_tool_agent(llm, messages: list, tools: list[Tool], *, max_turns: i
                 llm.achat(list(messages), schemas, on_chunk=stream.content if stream else None,
                           on_reasoning=stream.reasoning if stream else None, on_response=diagnostics.update, log_context=context, **sampling),
                 timeout=min(REQUEST_TIMEOUT, time_left))
-        except asyncio.TimeoutError as exc:
+        except Exception as exc:
+            if not retryable_request_error(exc):
+                raise
             timeouts += 1
-            if time_left < REQUEST_TIMEOUT:
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) and time_left < REQUEST_TIMEOUT:
                 raise ValueError('当前阶段超过总执行时限；已有修改保留在工作树') from exc
             if timeouts >= MAX_REQUEST_TIMEOUTS:
-                raise ValueError(f'模型请求连续 {timeouts} 次超过 {REQUEST_TIMEOUT} 秒，当前提供商未及时响应；已有修改保留在工作树') from exc
-            await report(f'模型请求 {turn} 超过 {REQUEST_TIMEOUT} 秒，重试')
+                raise ValueError(f'模型请求连续 {timeouts} 次中断，当前提供商未完成响应；已有修改保留在工作树') from exc
+            await report(f'模型请求 {turn} 中断（{type(exc).__name__}），重试')
             continue
         finally:
             if stream:
@@ -194,9 +233,10 @@ async def run_tool_agent(llm, messages: list, tools: list[Tool], *, max_turns: i
         for call in calls:
             name = call['function']['name']
             try:
-                args = json.loads(call['function']['arguments'] or '{}')
+                args = repair_unicode_escapes(json.loads(call['function']['arguments'] or '{}'))
                 if not isinstance(args, dict):
                     raise ValueError('参数必须是 JSON 对象')
+                call['function']['arguments'] = json.dumps(args, ensure_ascii=False)
                 error = None if name in by_name else f'未知工具 {name}，可用工具：{", ".join(by_name)}'
             except ValueError as exc:
                 args, error = {}, f'工具参数不是有效 JSON：{exc}'

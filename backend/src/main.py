@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import get_settings
 from .db.database import init_db
-from .api import bugs, agents, llm_config, websocket, projects, settings as settings_api
+from .api import bugs, agents, llm_config, websocket, projects, settings as settings_api, confirmation
 from .api.llm_config import load_config
 from .llm.factory import LLMFactory
 
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="云效 Bug 修复 Agent",
+    title="Self-Healing Agent Yunxiao",
     description="多 Agent 并发 Bug 修复系统",
     version="1.0.0",
     lifespan=lifespan,
@@ -87,12 +87,13 @@ app.include_router(llm_config.router)
 app.include_router(websocket.router)
 app.include_router(projects.router)
 app.include_router(settings_api.router)
+app.include_router(confirmation.router)
 
 
 @app.get("/")
 async def root():
     """健康检查"""
-    return {"status": "ok", "message": "云效 Bug Agent API"}
+    return {"status": "ok", "message": "Self-Healing Agent Yunxiao API"}
 
 
 @app.get("/health")

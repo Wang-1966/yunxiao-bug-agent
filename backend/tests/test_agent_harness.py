@@ -210,6 +210,40 @@ async def test_compaction_summarizes_and_rereads_recent_files(repository):
     assert messages[2]['content'].startswith('[较早的工具结果已压缩')
 
 
+def test_unexpected_eof_is_retried():
+    from src.core.tool_agent import retryable_request_error
+    assert retryable_request_error(RuntimeError('unexpected EOF'))
+    assert not retryable_request_error(ValueError('参数必须是 JSON 对象'))
+
+
+def test_double_escaped_tool_text_is_restored():
+    from src.core.tool_agent import repair_unicode_escapes
+    raw = '\\u5386\\u53f2列表 HandoutHistoryPanel.vue:121'
+    assert repair_unicode_escapes(raw).startswith('历史列表')
+    assert repair_unicode_escapes('讲义历史') == '讲义历史'
+    assert repair_unicode_escapes({'root_cause': raw})['root_cause'].startswith('历史列表')
+
+
+@pytest.mark.asyncio
+async def test_dropped_model_stream_is_retried(repository):
+    from src.core.agent_tools import build_tools
+    from src.core.tool_agent import run_tool_agent, submit_tool
+
+    def drop(_messages):
+        raise RuntimeError('peer closed connection without sending complete message body (incomplete chunked read)')
+
+    llm = ScriptedLLM([drop, turn(('submit_fix', {'summary': 'done'}))])
+
+    async def accept(args):
+        return args
+
+    tools = build_tools(Workspace(repository, mode='read'), commands=False)
+    tools.append(submit_tool('submit_fix', '提交', {'type': 'object', 'properties': {'summary': {'type': 'string'}}, 'required': ['summary']}, accept))
+    name, value = await run_tool_agent(llm, [{'role': 'system', 'content': 's'}, {'role': 'user', 'content': 'go'}], tools, max_turns=4)
+    assert name == 'submit_fix' and value['summary'] == 'done'
+    assert len(llm.calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_browser_tool_stays_on_the_preview_origin():
     from src.core.browser_tool import browser_action

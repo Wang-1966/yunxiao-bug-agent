@@ -1,4 +1,6 @@
 """Agent 节点实现"""
+import time
+import re
 from typing import Dict, Any
 from loguru import logger
 
@@ -152,7 +154,8 @@ async def fetch_bug_node(state: BugFixState) -> Dict[str, Any]:
 
 
 async def analyze_root_cause_node(state: BugFixState) -> Dict[str, Any]:
-    """分析根因：症状契约、假设、失败的复现测试、独立审查。"""
+    """分析根因：症状契约、假设、失败的复现测试。"""
+    start_time = time.time()
     logger.info(f"Analyzing root cause for bug: {state['bug_id']}")
     visual_context = state.get('visual_context')
 
@@ -166,7 +169,18 @@ async def analyze_root_cause_node(state: BugFixState) -> Dict[str, Any]:
             llm, LLMFactory.create(stage="analyze"), state['worktree_path'], prompt, bug=review_bug(state), visual=visual,
             images=state['bug_info'].get('agent_images'), previous_attempt=state.get('previous_attempt'), preview=agent_preview(state),
             on_operation=lambda message: record_source_operation(state, message), stream=thinking_stream(state))
-        logger.info(f"Analysis complete: confidence={result['confidence']}")
+
+        elapsed_time = time.time() - start_time
+        logger.info(f"Analysis complete: confidence={result['confidence']}, time={elapsed_time:.1f}s")
+
+        # 记录阶段耗时到日志
+        await record_source_operation(
+            state,
+            f"分析阶段完成，耗时 {elapsed_time:.1f} 秒（{elapsed_time/60:.1f} 分钟）",
+            level='info',
+            metadata={'stage': 'analyze', 'duration_seconds': elapsed_time}
+        )
+
         return {
             "root_cause": result['root_cause'],
             "analysis": result['analysis'],
@@ -176,6 +190,7 @@ async def analyze_root_cause_node(state: BugFixState) -> Dict[str, Any]:
             "source_context": result['source_context'],
             "visual_context": visual_context,
             "confidence": result['confidence'],
+            "stage_duration": elapsed_time,  # 新增：阶段耗时
             "stage": "proposing"
         }
 
@@ -199,16 +214,162 @@ async def wait_user_decision_node(state: BugFixState) -> Dict[str, Any]:
 
 
 async def design_proposal_node(state: BugFixState) -> Dict[str, Any]:
-    """方案随分析一起产出（分析 Agent 手握源码和复现结果）；此处只做校验并进入人工确认。"""
+    """方案随分析一起产出（分析 Agent 手握源码和复现结果）；根据配置判断是否需要人工确认。
+
+    支持三种确认模式：
+    - always: 总是需要确认（保守，适合生产环境）
+    - smart: 智能判断是否需要确认（默认，推荐）
+    - never: 从不需要确认（激进，适合开发环境）
+    """
     logger.info(f"Proposals ready for bug: {state['bug_id']}")
     proposals = state.get('proposals')
     if not isinstance(proposals, list) or not proposals:
         return {"error": '分析没有产出可执行的修复方案，请重新执行分析', "stage": "completed"}
-    return {"proposals": proposals, "stage": "awaiting_plan_confirmation", "waiting_for_user": True}
+
+    # 加载确认策略配置
+    from ..core.confirmation_manager import load_confirmation_config
+    config = load_confirmation_config()
+
+    # 根据配置模式决定是否需要确认
+    if config.mode == 'always':
+        # 总是需要确认
+        logger.info("Confirmation mode: always - requiring user confirmation")
+        await record_source_operation(state, "⚙️ 配置为总是确认方案")
+        return {
+            "proposals": proposals,
+            "stage": "awaiting_plan_confirmation",
+            "waiting_for_user": True
+        }
+    elif config.mode == 'never':
+        # 从不需要确认
+        logger.info("Confirmation mode: never - auto-approving all proposals")
+        await record_source_operation(state, "⚙️ 配置为自动执行（从不确认）")
+        return {
+            "proposals": proposals,
+            "selected_proposal": proposals[0],
+            "stage": "fixing",
+            "waiting_for_user": False
+        }
+    else:
+        # smart 模式：智能判断
+        need_confirmation = _should_require_user_confirmation(state, proposals, config)
+
+        if need_confirmation:
+            reason = state.get('confirmation_reason', '方案需要人工确认')
+            logger.info(f"Smart mode: requiring confirmation - {reason}")
+            await record_source_operation(state, f"需要用户确认方案：{reason}")
+            return {
+                "proposals": proposals,
+                "stage": "awaiting_plan_confirmation",
+                "waiting_for_user": True
+            }
+        else:
+            # 自动选择第一个方案并继续执行
+            logger.info("Smart mode: auto-approving - high confidence and low risk")
+            await record_source_operation(state, "✅ 自动执行修复（置信度高、风险低）")
+            return {
+                "proposals": proposals,
+                "selected_proposal": proposals[0],
+                "stage": "fixing",
+                "waiting_for_user": False
+            }
+
+
+def _should_require_user_confirmation(state: BugFixState, proposals: list, config) -> bool:
+    """智能判断是否需要用户确认方案（基于配置规则）。
+
+    返回 True 表示需要确认，False 表示自动执行。
+    """
+    from ..models.confirmation_config import ConfirmationConfig
+
+    bug_info = state.get('bug_info', {})
+    title = (bug_info.get('title') or '').lower()
+    description = (bug_info.get('description') or '').lower()
+
+    # 检查强制确认模式（优先级最高）
+    for pattern in config.force_confirm_patterns:
+        if re.search(pattern, title, re.IGNORECASE):
+            state['confirmation_reason'] = f'匹配强制确认规则：{pattern}'
+            return True
+
+    # 检查自动批准模式（优先级第二）
+    for pattern in config.auto_approve_patterns:
+        if re.search(pattern, title, re.IGNORECASE):
+            logger.info(f"Auto-approved by pattern: {pattern}")
+            return False
+
+    reasons = []
+    rules = config.rules
+
+    # 1. 检查置信度
+    if rules.require_on_low_confidence:
+        confidence = state.get('confidence', 'low')
+        if confidence == 'low':
+            reasons.append('置信度低（无复现测试）')
+
+    # 2. 检查方案数量
+    if rules.require_on_multiple_proposals:
+        if len(proposals) > rules.multiple_proposals_threshold:
+            reasons.append(f'多个方案（{len(proposals)} 个）需要选择')
+
+    # 3. 检查是否有复现测试
+    if rules.require_on_low_confidence:
+        repro = state.get('repro', {})
+        if not repro.get('reproduced'):
+            reasons.append('未能自动复现问题')
+
+    # 4. 检查风险级别
+    if rules.require_on_high_risk:
+        analysis = state.get('analysis', {})
+        root_cause = (state.get('root_cause') or '').lower()
+        text_to_check = f"{title} {description} {root_cause}"
+
+        high_risk_found = [kw for kw in rules.high_risk_keywords if kw in text_to_check]
+        if high_risk_found:
+            reasons.append(f'高风险修改（涉及：{", ".join(high_risk_found[:2])}）')
+
+    # 5. 检查改动范围
+    if rules.require_on_large_changes:
+        proposal = proposals[0] if proposals else {}
+        estimated_files = len(proposal.get('files', []))
+        if estimated_files > rules.large_changes_threshold:
+            reasons.append(f'改动范围大（预计 {estimated_files} 个文件）')
+
+    # 6. 检查是否有待确认问题
+    if rules.require_on_open_questions:
+        analysis = state.get('analysis', {})
+        open_questions = analysis.get('open_questions', []) if isinstance(analysis, dict) else []
+        if open_questions:
+            reasons.append(f'有待确认问题（{len(open_questions)} 个）')
+
+    # 7. 检查优先级
+    if rules.require_on_critical_priority:
+        priority = bug_info.get('priority', 'normal')
+        if priority == 'critical':
+            reasons.append('关键 bug 需要人工确认')
+
+    # 8. 检查数据结构变更
+    if rules.require_on_schema_changes:
+        text_to_check = f"{title} {description} {state.get('root_cause', '')}".lower()
+        schema_found = [kw for kw in rules.schema_keywords if kw in text_to_check]
+        if schema_found:
+            reasons.append('涉及数据结构变更')
+
+    # 决策逻辑：有任何不确定因素就需要确认
+    need_confirmation = len(reasons) > 0
+
+    if need_confirmation:
+        state['confirmation_reason'] = '；'.join(reasons)
+        logger.info(f"Requiring confirmation: {reasons}")
+    else:
+        logger.info("Auto-execution approved: high confidence, single clear solution, low risk")
+
+    return need_confirmation
 
 
 async def implement_fix_node(state: BugFixState) -> Dict[str, Any]:
-    """实施修复：续接分析会话，复现测试受保护，提交前系统重新运行复现命令并经审查。"""
+    """实施修复：续接分析会话，复现测试受保护，提交前系统重新运行复现命令。"""
+    start_time = time.time()
     logger.info(f"Implementing fix for bug: {state['bug_id']}")
     visual_context = state.get('visual_context')
 
@@ -228,23 +389,82 @@ async def implement_fix_node(state: BugFixState) -> Dict[str, Any]:
         files = await changed_files(state['worktree_path'])
         if not files:
             raise ValueError('执行器没有产生实际代码修改，不能标记为修复成功')
-        return {'modified_files': files, 'fix_summary': result['summary'], 'repro': result['repro'], 'review': result['review'],
-                'source_context': result['source_context'], 'visual_context': visual_context, 'stage': 'verifying'}
+
+        elapsed_time = time.time() - start_time
+        logger.info(f"Fix implementation complete, time={elapsed_time:.1f}s")
+
+        # 记录阶段耗时到日志
+        await record_source_operation(
+            state,
+            f"修复阶段完成，耗时 {elapsed_time:.1f} 秒（{elapsed_time/60:.1f} 分钟），修改了 {len(files)} 个文件",
+            level='info',
+            metadata={'stage': 'fix', 'duration_seconds': elapsed_time, 'files_changed': len(files)}
+        )
+
+        return {
+            'modified_files': files,
+            'fix_summary': result['summary'],
+            'repro': result['repro'],
+            'review': result['review'],
+            'source_context': result['source_context'],
+            'visual_context': visual_context,
+            'stage_duration': elapsed_time,  # 新增：阶段耗时
+            'stage': 'verifying'
+        }
     except Exception as exc:
+        elapsed_time = time.time() - start_time
         files = await changed_files(state['worktree_path']) if state.get('worktree_path') else []
-        return {'error': str(exc) or type(exc).__name__, 'visual_context': visual_context, 'modified_files': files, 'stage': 'completed'}
+        logger.error(f"Fix implementation failed after {elapsed_time:.1f}s: {exc}")
+        return {
+            'error': str(exc) or type(exc).__name__,
+            'visual_context': visual_context,
+            'modified_files': files,
+            'stage_duration': elapsed_time,
+            'stage': 'completed'
+        }
+
+
+MAX_VERIFY_ROUNDS = 3
 
 
 async def verify_fix_node(state: BugFixState) -> Dict[str, Any]:
-    """仅以实际命令退出结果判定验证是否通过。"""
+    """验证失败时把输出交回修复，而不是直接停下等人点重新执行。"""
+    start_time = time.time()
+    rounds = int(state.get('verify_rounds') or 0) + 1
     try:
         verified = await verify_and_commit_repair(state['worktree_path'], state['bug_info'].get('test_command'), state['bug_id'], state.get('repair_branch'), state.get('base_commit'), bug_title=state['bug_info'].get('title') or '', repro_command=(state.get('repro') or {}).get('command'))
         result = verified['test_results']
-        if not result['passed']:
-            return {'test_results': result, 'error': f"验证失败（退出码 {result['exit_code']}）：{result['output'][-3000:]}", 'stage': 'completed'}
-        return {**verified, 'stage': 'awaiting_confirmation', 'waiting_for_user': True}
+
+        elapsed_time = time.time() - start_time
+
+        if result['passed']:
+            logger.info(f"Verification passed, time={elapsed_time:.1f}s")
+            await record_source_operation(
+                state,
+                f"验证阶段完成，测试通过，耗时 {elapsed_time:.1f} 秒",
+                level='info',
+                metadata={'stage': 'verify', 'duration_seconds': elapsed_time, 'passed': True, 'rounds': rounds}
+            )
+            return {**verified, 'verify_rounds': rounds, 'stage_duration': elapsed_time, 'stage': 'awaiting_confirmation', 'waiting_for_user': True}
+
+        message = f"验证失败（退出码 {result['exit_code']}）：{result['output'][-3000:]}"
+        logger.warning(f"Verification failed after {elapsed_time:.1f}s: exit_code={result['exit_code']}")
+
+        if rounds >= MAX_VERIFY_ROUNDS:
+            await record_source_operation(
+                state,
+                f"验证阶段失败，已达到最大重试次数 {rounds}，耗时 {elapsed_time:.1f} 秒",
+                level='error',
+                metadata={'stage': 'verify', 'duration_seconds': elapsed_time, 'passed': False, 'rounds': rounds}
+            )
+            return {'test_results': result, 'verify_rounds': rounds, 'stage_duration': elapsed_time, 'error': message, 'stage': 'completed'}
+
+        await record_source_operation(state, f'验证未通过，交回修复（第 {rounds} 次），耗时 {elapsed_time:.1f} 秒')
+        return {'test_results': result, 'verify_rounds': rounds, 'stage_duration': elapsed_time, 'retry_context': message + '\n请直接修正验证指出的问题，然后继续。', 'stage': 'fixing'}
     except Exception as exc:
-        return {'error': str(exc) or type(exc).__name__, 'stage': 'completed'}
+        elapsed_time = time.time() - start_time
+        logger.error(f"Verification error after {elapsed_time:.1f}s: {exc}")
+        return {'error': str(exc) or type(exc).__name__, 'verify_rounds': rounds, 'stage_duration': elapsed_time, 'stage': 'completed'}
 
 
 async def prepare_repository_node(state: BugFixState) -> Dict[str, Any]:

@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api import bugs
+from src.tools.yunxiao.openapi_client import YunxiaoClient
 
 
 def test_source_status_filter_before_pagination(tmp_path, monkeypatch):
@@ -38,6 +39,34 @@ def test_source_status_filter_before_pagination(tmp_path, monkeypatch):
     assert result['items'][0]['bug_id'] == 'open'
     assert client.get('/api/bugs', params={'source_status': '处理中', 'status': 'resolved'}).json()['total'] == 0
     assert client.get('/api/bugs', params={'exclude_closed_yunxiao': True, 'source_status': '已关闭'}).json()['total'] == 0
+
+
+def test_yunxiao_status_can_be_changed_from_the_list(tmp_path, monkeypatch):
+    path = tmp_path / 'bugs.db'
+    with sqlite3.connect(path) as db:
+        db.executescript(Path('src/db/init.sql').read_text())
+        db.execute("INSERT INTO bugs (bug_id, title, priority, source, source_status) VALUES ('open', 'Bug', 'normal', 'yunxiao', '待确认')")
+        db.execute("INSERT INTO bugs (bug_id, title, priority, source) VALUES ('local', '手工', 'normal', 'manual')")
+    monkeypatch.setattr(bugs, 'get_db_path', lambda: str(path))
+
+    async def names(self, bug_id):
+        assert bug_id == 'open'
+        return ['待确认', '处理中', '已关闭']
+
+    async def update(self, bug_id, status):
+        assert status == '处理中'
+        return {'status_id': 'doing', 'source_status': '处理中'}
+
+    monkeypatch.setattr(YunxiaoClient, 'list_bug_status_names', names)
+    monkeypatch.setattr(YunxiaoClient, 'set_bug_status', update)
+    app = FastAPI()
+    app.include_router(bugs.router)
+    client = TestClient(app)
+    assert client.get('/api/bugs/open/yunxiao-statuses').json() == {'statuses': ['待确认', '处理中', '已关闭']}
+    assert client.put('/api/bugs/open/yunxiao-status', json={'status': '处理中'}).json() == {'source_status': '处理中'}
+    assert client.get('/api/bugs/open').json()['source_status'] == '处理中'
+    assert client.put('/api/bugs/local/yunxiao-status', json={'status': '处理中'}).status_code == 409
+    assert client.put('/api/bugs/missing/yunxiao-status', json={'status': '处理中'}).status_code == 404
 
 
 def test_dashboard_counts_all_visible_bugs_and_verified_repairs(tmp_path, monkeypatch):

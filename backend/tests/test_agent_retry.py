@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from src.api import agents
 from src.core import orchestrator
 from src.core.repair_executor import prepare_worktree
+from fake_agent import adapt_operate
 
 
 @pytest.fixture
@@ -60,7 +61,7 @@ def patched_workflow(client, operate):
         patch('src.api.bugs.get_bug_details', AsyncMock(return_value={'title': 'Bug', 'description': '描述'})),
         patch('src.core.orchestrator.resolve_project_config', AsyncMock(return_value={'repo_path': '/repo', 'branch': 'main', 'test_command': 'true'})),
         patch('src.agent.nodes.LLMFactory.create', return_value=client),
-        patch('src.agent.nodes.repository_agent', side_effect=operate),
+        patch.multiple('src.agent.nodes', **dict(zip(('run_analysis', 'run_fix'), adapt_operate(operate)))),
     )
 
 
@@ -68,11 +69,9 @@ def patched_workflow(client, operate):
 async def test_proposal_failure_resumes_same_agent_without_reanalysis(task_db, worktree):
     runner = orchestrator.MultiAgentOrchestrator()
     runner._running = True
-    agent_id = await fail_task(runner, {**worktree, 'root_cause': '已确认根因', 'confidence': 'high'}, '模型未返回可执行的修复方案', 'design_proposal')
-    client = AsyncMock()
-    client.ainvoke.return_value = json.dumps({'proposals': [{'name': '新方案'}]})
+    agent_id = await fail_task(runner, {**worktree, 'root_cause': '已确认根因', 'proposals': [{'name': '已有方案', 'steps': ['改']}], 'confidence': 'high'}, '分析没有产出可执行的修复方案', 'design_proposal')
     operate = AsyncMock(side_effect=AssertionError('不应重新分析源码'))
-    p1, p2, p3, p4 = patched_workflow(client, operate)
+    p1, p2, p3, p4 = patched_workflow(AsyncMock(), operate)
     with p1, p2, p3, p4, patch.object(agents, 'get_orchestrator', return_value=runner):
         result = await agents.retry_agent(agent_id)
         assert result['mode'] == 'resume' and result['agent_id'] == agent_id and result['start_node'] == 'design_proposal'
@@ -82,8 +81,7 @@ async def test_proposal_failure_resumes_same_agent_without_reanalysis(task_db, w
     assert statuses[0].status == 'awaiting_plan_confirmation'
     assert statuses[0].root_cause == '已确认根因'
     assert statuses[0].worktree_path == worktree['worktree_path']
-    user_messages = [message['content'] for message in client.ainvoke.call_args.args[0] if message['role'] == 'user']
-    assert any('已确认根因' in content and '模型未返回可执行的修复方案' in content for content in user_messages)
+    assert runner.agent_states[agent_id]['state']['proposals'] == [{'name': '已有方案', 'steps': ['改']}]
 
 
 @pytest.mark.asyncio
@@ -206,7 +204,8 @@ async def test_legacy_failure_resumes_after_newer_task_is_deleted(task_db, workt
     await runner.delete_agent(newer)
     runner.task_queue.get_nowait()
     result = await runner.retry_agent(old_agent)
-    assert result['mode'] == 'resume' and result['start_node'] == 'design_proposal'
+    # 旧记录只有根因、没有分析 Agent 产出的方案，必须重新分析。
+    assert result['mode'] == 'resume' and result['start_node'] == 'analyze_root_cause'
     async with aiosqlite.connect(task_db) as db:
         assert await (await db.execute("SELECT status, assigned_agent_id FROM bugs WHERE bug_id='one'")).fetchone() == ('analyzing', old_agent)
 

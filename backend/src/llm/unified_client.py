@@ -29,7 +29,7 @@ class UnifiedLLMClient:
         self,
         messages: List[Dict[str, Any]],
         model: str,
-        temperature: float = 0.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 8000,
         on_chunk=None,
         on_response=None,
@@ -68,15 +68,59 @@ class UnifiedLLMClient:
             if on_response:
                 on_response({**diagnostics, **response_summary(''.join(chunks), (self.provider.api_key,))})
 
+    async def achat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: List[Dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: int = 16000,
+        on_chunk=None,
+        on_reasoning=None,
+        on_response=None,
+        log_context=None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """原生工具调用：返回 {'content', 'tool_calls'}，tool_calls 为 OpenAI 格式。"""
+        diagnostics, content, calls = {}, [], {}
+
+        def on_tool_delta(items):
+            for item in items:
+                index = item.get('index', len(calls))
+                call = calls.setdefault(index, {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}})
+                call['id'] = item.get('id') or call['id']
+                function = item.get('function') or {}
+                # 部分中转在一个片段里给出完整名称，部分逐字流式下发；名称只取首次完整值。
+                if function.get('name') and not call['function']['name']:
+                    call['function']['name'] = function['name']
+                call['function']['arguments'] += function.get('arguments') or ''
+
+        try:
+            async for chunk in self.astream(messages, model, temperature, max_tokens, diagnostics=diagnostics, log_context=log_context,
+                                            on_reasoning=on_reasoning, on_tool_delta=on_tool_delta, tools=tools, **kwargs):
+                content.append(chunk)
+                if on_chunk:
+                    await on_chunk(chunk)
+        finally:
+            if on_response:
+                on_response({**diagnostics, 'tool_calls': len(calls), **response_summary(''.join(content), (self.provider.api_key,))})
+        tool_calls = []
+        for index in sorted(calls):
+            call = calls[index]
+            call['id'] = call['id'] or f'call_{index}'
+            tool_calls.append(call)
+        return {'content': ''.join(content), 'tool_calls': tool_calls}
+
     async def astream(
         self,
         messages: List[Dict[str, Any]],
         model: str,
-        temperature: float = 0.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 8000,
         diagnostics=None,
         log_context=None,
         on_reasoning=None,
+        on_tool_delta=None,
         **kwargs,
     ) -> AsyncIterator[str]:
         """以 OpenAI 兼容的 SSE 流读取文本片段；调用方可自行累积成 JSON。"""
@@ -85,10 +129,11 @@ class UnifiedLLMClient:
         diagnostics.update(provider=self.provider.id, model=model, context=log_context,
                            stream_chunks=0, content_chars=0, reasoning_chars=0, finish_reasons=[])
         delta_fields = set()
+        if temperature is not None:
+            kwargs['temperature'] = temperature
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
             **kwargs,
@@ -110,6 +155,8 @@ class UnifiedLLMClient:
                         diagnostics['reasoning_chars'] += len(reasoning)
                         if on_reasoning:
                             await on_reasoning(reasoning)
+                    if on_tool_delta and values.get('tool_calls'):
+                        on_tool_delta(values['tool_calls'])
                 reason = getattr(chunk.choices[0], 'finish_reason', None) if chunk.choices else None
                 if reason:
                     diagnostics['finish_reasons'].append(reason)

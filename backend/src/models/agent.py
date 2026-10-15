@@ -30,6 +30,10 @@ class AgentStatus(BaseModel):
     git_commit_hash: Optional[str] = None
     modified_files: list[str] = Field(default_factory=list)
     root_cause: Optional[str] = None
+    confidence: Optional[str] = None
+    analysis: Optional[dict] = None
+    repro: Optional[dict] = None
+    review: Optional[dict] = None
     fix_summary: Optional[str] = None
     test_results: dict = Field(default_factory=dict)
     confirmation: Optional[dict] = None

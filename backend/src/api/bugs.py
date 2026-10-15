@@ -5,7 +5,7 @@ import aiosqlite
 import json
 from typing import Optional
 
-from ..models.bug import Bug, BugCreate, BugUpdate, BugListResponse, BugSupplementUpdate
+from ..models.bug import Bug, BugCreate, BugUpdate, BugListResponse, BugSupplementUpdate, YunxiaoStatusUpdate
 from ..config import get_settings
 
 router = APIRouter(prefix="/api/bugs", tags=["Bugs"])
@@ -118,6 +118,44 @@ async def list_source_statuses():
     except Exception:
         logger.error("Failed to load Yunxiao status options")
         raise HTTPException(status_code=500, detail="加载云效状态失败")
+
+
+async def _require_yunxiao_bug(bug_id: str):
+    async with aiosqlite.connect(get_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute('SELECT source FROM bugs WHERE bug_id=?', (bug_id,))).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail='Bug 不存在')
+    if row['source'] != 'yunxiao':
+        raise HTTPException(status_code=409, detail='只有云效缺陷可以修改云效状态')
+
+
+@router.get('/{bug_id}/yunxiao-statuses')
+async def list_yunxiao_statuses(bug_id: str):
+    """读取该缺陷工作流里可选的云效状态。"""
+    await _require_yunxiao_bug(bug_id)
+    from ..tools.yunxiao.openapi_client import YunxiaoClient, YunxiaoError
+    try:
+        names = await YunxiaoClient(get_settings()).list_bug_status_names(bug_id)
+    except YunxiaoError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {'statuses': names}
+
+
+@router.put('/{bug_id}/yunxiao-status')
+async def update_yunxiao_status(bug_id: str, body: YunxiaoStatusUpdate):
+    """把云效工作项状态改成所选名称，并写回本地列表。"""
+    await _require_yunxiao_bug(bug_id)
+    from ..tools.yunxiao.openapi_client import YunxiaoClient, YunxiaoError
+    try:
+        result = await YunxiaoClient(get_settings()).set_bug_status(bug_id, body.status)
+    except YunxiaoError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    async with aiosqlite.connect(get_db_path()) as db:
+        await db.execute('UPDATE bugs SET source_status=?, updated_at=CURRENT_TIMESTAMP WHERE bug_id=?',
+                         (result['source_status'], bug_id))
+        await db.commit()
+    return {'source_status': result['source_status']}
 
 
 @router.get("/{bug_id}", response_model=Bug)

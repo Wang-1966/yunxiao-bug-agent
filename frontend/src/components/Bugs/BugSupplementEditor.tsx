@@ -81,7 +81,7 @@ export default function BugSupplementEditor({ bug, onStarted, onDirtyChange }: P
       {saved.image_warning && <Alert type="warning" showIcon message={saved.image_warning} />}
       <label htmlFor="bug-supplement-notes">补充说明（选填）</label>
       <RichInput id="bug-supplement-notes" value={draft} onChange={setDraft} disabled={saving}
-        onBusyChange={setReading} maxLength={12000}
+        onBusyChange={setReading}
         placeholder="描述复现步骤、实际表现、预期结果；截图直接粘贴在这里…" />
       {!canStart && <p className="description-empty">当前状态不能启动新修复。保存的新资料会在下一轮启动时使用。</p>}
       <Space wrap>

@@ -9,7 +9,7 @@ echo "======================================"
 echo ""
 
 # 检查当前目录
-if [ ! -f "PROGRESS.md" ]; then
+if [ ! -d "backend" ] || [ ! -d "frontend" ]; then
     echo "❌ 错误：请在项目根目录运行此脚本"
     exit 1
 fi
@@ -62,23 +62,39 @@ echo ""
 # 3. 启动后端
 echo "🚀 [3/4] 启动后端服务..."
 cd ../backend
-nohup venv/bin/python -m src.main > backend.log 2>&1 &
-BACKEND_PID=$!
-echo "✅ 后端服务已启动 (PID: $BACKEND_PID)"
+BACKEND_STARTED=1
+if lsof -nP -iTCP:8000 -sTCP:LISTEN -t >/dev/null 2>&1; then
+    if curl -fsS http://localhost:8000/health > /dev/null 2>&1; then
+        BACKEND_STARTED=0
+        BACKEND_PID=$(lsof -tiTCP:8000 -sTCP:LISTEN | head -n 1)
+        echo "✅ 后端服务已在运行，复用现有进程 (PID: $BACKEND_PID)"
+    else
+        echo "❌ 端口 8000 已被占用，但健康检查未通过"
+        exit 1
+    fi
+else
+    nohup venv/bin/python -m src.main > backend.log 2>&1 &
+    BACKEND_PID=$!
+    echo "✅ 后端服务已启动 (PID: $BACKEND_PID)"
+fi
 echo "   日志: backend/backend.log"
 echo "   地址: http://localhost:8000"
 echo ""
 
 # 等待后端启动
-echo "⏳ 等待后端启动..."
-sleep 5
+if [ "$BACKEND_STARTED" -eq 1 ]; then
+    echo "⏳ 等待后端启动..."
+    sleep 5
+fi
 
 # 检查后端是否启动成功
-if kill -0 "$BACKEND_PID" 2>/dev/null && curl -fsS http://localhost:8000/health > /dev/null 2>&1; then
+if curl -fsS http://localhost:8000/health > /dev/null 2>&1; then
     echo "✅ 后端健康检查通过"
 else
     echo "❌ 后端启动失败，请检查 backend/backend.log"
-    kill "$BACKEND_PID" 2>/dev/null || true
+    if [ "$BACKEND_STARTED" -eq 1 ]; then
+        kill "$BACKEND_PID" 2>/dev/null || true
+    fi
     exit 1
 fi
 echo ""
@@ -93,14 +109,18 @@ echo ""
 
 # 保存 PID
 cd ..
-echo "$BACKEND_PID" > .backend.pid
+if [ "$BACKEND_STARTED" -eq 1 ]; then
+    echo "$BACKEND_PID" > .backend.pid
+else
+    rm -f .backend.pid
+fi
 echo "$FRONTEND_PID" > .frontend.pid
 
 echo "======================================"
 echo "✅ 启动完成！"
 echo "======================================"
 echo ""
-echo "🌐 前端地址: http://localhost:3000"
+echo "🌐 前端地址: http://localhost:3001"
 echo "🔧 后端地址: http://localhost:8000"
 echo "📚 API 文档: http://localhost:8000/docs"
 echo ""

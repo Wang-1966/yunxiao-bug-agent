@@ -63,6 +63,20 @@ async def assert_port_closed(port):
         writer.close()
 
 
+async def test_agent_can_preview_a_dirty_worktree(repository):
+    prepared = await prepare_worktree({'repo_path': str(repository), 'branch': 'main'})
+    worktree = Path(prepared['worktree_path'])
+    (worktree / 'page.txt').write_text('dirty repair')
+    command = f'{shlex.quote(sys.executable)} -u -m http.server {{port}} --bind 127.0.0.1'
+    with pytest.raises(ValueError, match='已验证提交'):
+        await previews.start_preview('dirty', worktree_path=str(worktree), repo_path=str(repository), command=command,
+                                      env_files=[], commit=prepared['base_commit'], branch=prepared['repair_branch'])
+    await previews.start_preview('dirty', worktree_path=str(worktree), repo_path=str(repository), command=command,
+                                  env_files=[], commit='', branch=prepared['repair_branch'], allow_dirty=True)
+    running = await wait_status('dirty', 'running')
+    assert b'dirty repair' in await fetch(running['port'])
+
+
 async def test_preview_serves_worktree_reuses_service_and_switches_exclusively(repository):
     prepared, result = await start(repository)
     first = await wait_status('one', 'running')

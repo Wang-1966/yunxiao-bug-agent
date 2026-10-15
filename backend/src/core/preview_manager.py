@@ -284,7 +284,7 @@ async def check_project_change(previous, updated):
             raise ValueError('请先停止项目，再修改仓库、固定端口、启动命令或解除绑定')
 
 
-async def start_preview(agent_id, *, worktree_path, repo_path, command, env_files, commit, branch, public_port=None):
+async def start_preview(agent_id, *, worktree_path, repo_path, command, env_files, commit, branch, public_port=None, allow_dirty=False):
     command = command.strip()
     if not command:
         raise ValueError('请先到项目管理配置人工验收预览命令')
@@ -295,7 +295,14 @@ async def start_preview(agent_id, *, worktree_path, repo_path, command, env_file
         raise ValueError('修复工作树已移除或不在配置的工作树目录中')
     if Path(await git(worktree, 'rev-parse', '--show-toplevel')).resolve() != worktree or await git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir') != await git(worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir'):
         raise ValueError('Agent 工作树不属于当前项目仓库')
-    if not commit or await git(worktree, 'rev-parse', 'HEAD') != commit or await git(worktree, 'branch', '--show-current') != branch or await git(worktree, 'status', '--porcelain'):
+    head = await git(worktree, 'rev-parse', 'HEAD')
+    current_branch = await git(worktree, 'branch', '--show-current')
+    # ponytail: 人工预览必须对上已验证提交；Agent 修代码时工作树是脏的，allow_dirty 只跳过这一项。
+    if allow_dirty:
+        if branch and current_branch != branch:
+            raise ValueError('修复工作树分支已变化，请重新执行')
+        commit = head
+    elif not commit or head != commit or current_branch != branch or await git(worktree, 'status', '--porcelain'):
         raise ValueError('工作树与已验证提交不一致，请重新执行验证')
     async with _lock:
         current = _previews.get(agent_id)

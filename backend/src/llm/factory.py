@@ -22,6 +22,15 @@ class LLMClientWrapper:
             **{**self.defaults, **kwargs}
         )
 
+    async def achat(self, messages: list[dict], tools: list[dict], **kwargs):
+        """原生工具调用"""
+        return await self.client.achat(
+            messages=messages,
+            model=self.model,
+            tools=tools,
+            **{**self.defaults, **kwargs}
+        )
+
 
 class LLMFactory:
     """LLM 客户端工厂"""

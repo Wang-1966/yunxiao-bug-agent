@@ -1,7 +1,0 @@
-$task
-
-仓库约束：
-$instructions
-
-根目录概览（使用list浏览具体目录）：
-$inventory

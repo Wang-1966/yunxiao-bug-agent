@@ -6,7 +6,6 @@ from .state import BugFixState
 from .nodes import (
     fetch_bug_node,
     analyze_root_cause_node,
-    add_logging_node,
     design_proposal_node,
     implement_fix_node,
     verify_fix_node,
@@ -14,28 +13,10 @@ from .nodes import (
 )
 
 
-def should_add_logging(state: BugFixState) -> str:
-    """判断是否需要添加日志"""
-    if state.get('error'):
-        return END
-    if state.get("need_logging"):
-        return "add_logging"
-    return "design_proposal"
-
-
-def should_wait_user(state: BugFixState) -> str:
-    """判断是否需要等待用户决策"""
-    confidence = state.get("confidence", "medium")
-    if confidence == "low":
-        return "wait_user"
-    return "design_proposal"
-
-
 STAGE_ORDER = (
     'fetch_bug',
     'prepare_repository',
     'analyze_root_cause',
-    'add_logging',
     'design_proposal',
     'implement_fix',
     'verify_fix',
@@ -48,13 +29,12 @@ def _unless_error(target: str):
 
 def create_bug_fix_graph(start_node: str = "fetch_bug") -> StateGraph:
     """创建 Bug 修复状态图；从 start_node 开始，只包含其后的节点。"""
-    if start_node not in STAGE_ORDER or start_node == 'add_logging':
+    if start_node not in STAGE_ORDER:
         raise ValueError(f'不支持从 {start_node} 开始执行')
     nodes = {
         'fetch_bug': fetch_bug_node,
         'prepare_repository': prepare_repository_node,
         'analyze_root_cause': analyze_root_cause_node,
-        'add_logging': add_logging_node,
         'design_proposal': design_proposal_node,
         'implement_fix': implement_fix_node,
         'verify_fix': verify_fix_node,
@@ -70,15 +50,9 @@ def create_bug_fix_graph(start_node: str = "fetch_bug") -> StateGraph:
         workflow.add_conditional_edges('fetch_bug', _unless_error('prepare_repository'), {END: END, 'prepare_repository': 'prepare_repository'})
         workflow.add_conditional_edges('prepare_repository', _unless_error('analyze_root_cause'), {END: END, 'analyze_root_cause': 'analyze_root_cause'})
 
-    # 分析后：需要日志 -> 添加日志 -> 设计方案
-    #         不需要日志 -> 设计方案
+    # 分析（含复现与审查）后直接进入方案确认；方案由分析 Agent 一并产出。
     if 'analyze_root_cause' in included:
-        workflow.add_conditional_edges(
-            "analyze_root_cause",
-            should_add_logging,
-            {"add_logging": "add_logging", "design_proposal": "design_proposal", END: END},
-        )
-        workflow.add_conditional_edges('add_logging', _unless_error('design_proposal'), {END: END, 'design_proposal': 'design_proposal'})
+        workflow.add_conditional_edges('analyze_root_cause', _unless_error('design_proposal'), {END: END, 'design_proposal': 'design_proposal'})
     if 'design_proposal' in included:
         # 调度器传入 require_plan_confirmation 时暂停；底层图的历史直接调用保持兼容。
         workflow.add_conditional_edges(

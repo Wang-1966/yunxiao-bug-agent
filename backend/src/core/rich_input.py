@@ -13,7 +13,7 @@ _CHILDREN = {
 }
 
 
-def normalize_document(document, image_map, max_length):
+def normalize_document(document, image_map, max_length=None):
     if len(json.dumps(document, ensure_ascii=False)) > 200_000:
         raise ValueError('图文内容过大')
     count, characters, referenced = 0, 0, set()
@@ -64,7 +64,7 @@ def normalize_document(document, image_map, max_length):
     if not isinstance(document, dict) or document.get('type') != 'doc':
         raise ValueError('图文内容必须是有效文档')
     normalized = visit(document)
-    if characters > max_length:
+    if max_length is not None and characters > max_length:
         raise ValueError(f'文字不能超过 {max_length} 字')
     if referenced != set(range(len(image_map))):
         raise ValueError('存在未关联到图文内容的截图')
@@ -96,10 +96,13 @@ def remap_document_images(node, image_map):
     return {**node, **({'content': [remap_document_images(child, image_map) for child in node['content']]} if 'content' in node else {})}
 
 
-def save_rich_input(db_path, text, images, document, *, max_length):
+def save_rich_input(db_path, text, images, document, *, max_length=None):
     """旧请求继续支持 text+images；新文档以自身内容为准，不信任客户端文字摘要。"""
     if document is None:
-        return text.strip(), save_images(db_path, images), None
+        text = text.strip()
+        if max_length is not None and len(text) > max_length:
+            raise ValueError(f'文字不能超过 {max_length} 字')
+        return text, save_images(db_path, images), None
     # 先校验文档和全部图片，再落盘；重复图在文档中的位置仍保留。
     names = []
     image_map = []

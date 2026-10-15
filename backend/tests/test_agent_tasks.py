@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiosqlite
+from fake_agent import REVIEW_OK, ScriptedLLM, adapt_operate, analysis_args, turn
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -350,15 +351,15 @@ async def run_verified_repair(task_db, tmp_path, monkeypatch, command=None):
         await db.execute("UPDATE bugs SET repo_path=?, branch='main', test_command=?, source='yunxiao', source_project_id='legacy-project' WHERE bug_id='one'", (str(repo), command or f'{sys.executable} app.py'))
         await db.execute("INSERT INTO projects (project_id, name, repo_path, branch, test_command) VALUES ('legacy-project', 'Legacy', ?, 'main', ?)", (str(repo), command or f'{sys.executable} app.py'))
         await db.commit()
-    client = AsyncMock()
-    client.ainvoke.side_effect = [
-        json.dumps({'action': 'read', 'path': 'app.py'}),
-        json.dumps({'action': 'finish', 'result': {'root_cause': 'value should be 2', 'confidence': 'high'}}),
-        json.dumps({'proposals': [{'name': 'correct value'}]}),
-        json.dumps({'action': 'read', 'path': 'app.py'}),
-        json.dumps({'action': 'edit', 'edits': [{'path': 'app.py', 'before': 'value = 1', 'after': 'value = 2'}]}),
-        json.dumps({'action': 'finish', 'result': {'summary': 'Correct value assignment'}}),
-    ]
+    client = ScriptedLLM([
+        turn(('read_file', {'path': 'app.py'})),
+        turn(analysis_args()),
+        turn(REVIEW_OK),
+        turn(('read_file', {'path': 'app.py'})),
+        turn(('edit_file', {'path': 'app.py', 'old_string': 'value = 1', 'new_string': 'value = 2'})),
+        turn(('submit_fix', {'summary': 'Correct value assignment'})),
+        turn(REVIEW_OK),
+    ])
     runner = orchestrator.MultiAgentOrchestrator()
     runner._running = True
     with patch.object(agents, 'get_orchestrator', return_value=runner), patch('src.agent.nodes.LLMFactory.create', return_value=client):
@@ -389,7 +390,6 @@ async def test_proposal_feedback_reanalyzes_until_explicit_confirmation(task_db,
     runner.agent_states[agent_id]['state'] = state
     await runner._save_status(agent_id, task, 'awaiting_plan_confirmation', 'awaiting_plan_confirmation', '待确认')
     client = AsyncMock()
-    client.ainvoke.side_effect = [json.dumps({'proposals': [{'name': '新方案'}]})] * 2
     seen = []
 
     async def operate(llm, path, prompt, writable=False, **kwargs):
@@ -401,7 +401,8 @@ async def test_proposal_feedback_reanalyzes_until_explicit_confirmation(task_db,
 
     with patch('src.api.bugs.get_bug_details', AsyncMock(return_value={'title': 'Bug', 'description': '描述'})), \
          patch('src.agent.nodes.LLMFactory.create', return_value=client), \
-         patch('src.agent.nodes.repository_agent', side_effect=operate), \
+         patch.multiple('src.agent.nodes', **dict(zip(('run_analysis', 'run_fix'), adapt_operate(operate)))), \
+         patch('src.agent.nodes.repository_context', AsyncMock(return_value={'instructions': '无', 'inventory': 'app.py'})), \
          patch('src.agent.nodes.changed_files', AsyncMock(return_value=['app.py'])), \
          patch('src.agent.nodes.verify_and_commit_repair', AsyncMock(return_value={'test_results': {'passed': True}, 'git_commit_hash': 'a' * 40})):
         for feedback in ('实际问题是无法输入', '仅发生在分式公式之后'):
@@ -423,9 +424,6 @@ async def test_proposal_feedback_reanalyzes_until_explicit_confirmation(task_db,
                 await runner.confirm_proposal(agent_id, 0, decision_id=previous_id)
         assert all(not writable for _, writable in seen)
         assert '实际问题是无法输入' in seen[-1][0] and '仅发生在分式公式之后' in seen[-1][0]
-        for call in client.ainvoke.call_args_list:
-            user_messages = [message['content'] for message in call.args[0] if message['role'] == 'user']
-            assert any('实际问题是无法输入' in content for content in user_messages)
         runner = orchestrator.MultiAgentOrchestrator()
         result = await runner.confirm_proposal(agent_id, 0)
         assert result['status'] == 'fixing'
@@ -725,7 +723,6 @@ async def test_image_only_proposal_feedback_reanalyzes_with_screenshot(task_db, 
     runner.agent_states[agent_id]['state'] = {'bug_id': 'one', 'stage': 'awaiting_plan_confirmation', 'proposals': [{'name': '旧方案'}], 'worktree_path': str(worktree), 'repair_branch': 'repair'}
     await runner._save_status(agent_id, task, 'awaiting_plan_confirmation', 'awaiting_plan_confirmation', '待确认')
     client = AsyncMock()
-    client.ainvoke.return_value = json.dumps({'proposals': [{'name': '新方案'}]})
     seen = []
 
     async def operate(llm, path, prompt, writable=False, **kwargs):
@@ -737,7 +734,8 @@ async def test_image_only_proposal_feedback_reanalyzes_with_screenshot(task_db, 
     with patch('src.api.bugs.get_bug_details', AsyncMock(return_value={'title': 'Bug', 'description': '描述'})), \
          patch('src.agent.nodes.LLMFactory.create', return_value=client), \
          patch('src.agent.nodes.describe_bug_images', AsyncMock(return_value=None)), \
-         patch('src.agent.nodes.repository_agent', side_effect=operate):
+         patch('src.agent.nodes.repository_context', AsyncMock(return_value={'instructions': '无', 'inventory': 'app.py'})), \
+         patch.multiple('src.agent.nodes', **dict(zip(('run_analysis', 'run_fix'), adapt_operate(operate)))):
         result = await runner.confirm_proposal(agent_id, 0, '  ', None, [PNG])
         assert result['status'] == 'analyzing'
         await runner.running_agents[agent_id]

@@ -29,3 +29,15 @@ export function getStatusLabel(status?: string): string {
   if (!status) return '-';
   return Object.hasOwn(statusLabels, status) ? statusLabels[status] : '未知状态';
 }
+
+const sourceStatusTones: Record<string, string> = {
+  待确认: 'todo',
+  处理中: 'doing',
+  暂不修复: 'hold',
+  已修复: 'done',
+  已关闭: 'closed',
+};
+
+export function sourceStatusClass(status: string): string {
+  return `yunxiao-status yunxiao-status-${sourceStatusTones[status] || 'other'}`;
+}

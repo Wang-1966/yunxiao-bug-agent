@@ -92,7 +92,7 @@ async def test_queue_and_resume_freeze_notes_images_and_cloud_description(supple
         resumed = await fetch_bug_node(restored)
     assert resumed['bug_info']['description'] == '原正文'
     assert resumed['bug_info']['agent_images'] == [PNG]
-    for stage, context in [('analyze', {}), ('propose', {}), ('fix', {'proposal': '方案'})]:
+    for stage, context in [('analyze', {'instructions': '无', 'inventory': 'app.py：1 个文件'}), ('fix', {'proposal': '方案', 'repro': '无'})]:
         prompt = build_agent_prompt(stage, {'bug_id': 'one', **resumed}, **context)
         assert '第一轮说明' in prompt and '第二轮说明' not in prompt
         assert '原图编号 1–1' in prompt

@@ -42,7 +42,7 @@ interface Props {
   value: RichInputValue;
   onChange: (value: RichInputValue) => void;
   placeholder: string;
-  maxLength: number;
+  maxLength?: number;
   disabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }
@@ -86,7 +86,7 @@ export default function RichInput({ id, value, onChange, placeholder, maxLength,
 
   const editor = useEditor({
     extensions: [StarterKit.configure({ heading: false, horizontalRule: false, link: false, underline: false }), Screenshot,
-      Placeholder.configure({ placeholder }), CharacterCount.configure({ limit: maxLength })],
+      Placeholder.configure({ placeholder }), CharacterCount.configure(maxLength ? { limit: maxLength } : {})],
     content: editorContent(value),
     immediatelyRender: true,
     editorProps: {
@@ -171,6 +171,6 @@ export default function RichInput({ id, value, onChange, placeholder, maxLength,
       </Tooltip>)}
     </div>
     <EditorContent editor={editor} />
-    <div className="rich-input-footer"><span>{reading ? '正在粘贴图片…' : '直接粘贴文字或截图，支持拖入图片'}</span><span>{characters}/{maxLength} 字 · {imageCount}/{MAX_IMAGES} 张图</span></div>
+    <div className="rich-input-footer"><span>{reading ? '正在粘贴图片…' : '直接粘贴文字或截图，支持拖入图片'}</span><span>{characters}{maxLength ? `/${maxLength}` : ''} 字 · {imageCount}/{MAX_IMAGES} 张图</span></div>
   </div>;
 }

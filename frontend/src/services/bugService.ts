@@ -21,6 +21,16 @@ export const bugService = {
     return response.data;
   },
 
+  async yunxiaoStatuses(bugId: string): Promise<string[]> {
+    const response = await api.get(`/api/bugs/${encodeURIComponent(bugId)}/yunxiao-statuses`);
+    return response.data.statuses;
+  },
+
+  async updateYunxiaoStatus(bugId: string, status: string): Promise<{ source_status: string }> {
+    const response = await api.put(`/api/bugs/${encodeURIComponent(bugId)}/yunxiao-status`, { status });
+    return response.data;
+  },
+
   async dashboardStats(): Promise<{ total: number; critical: number; resolved: number }> {
     const response = await api.get('/api/bugs/stats/dashboard');
     return response.data;

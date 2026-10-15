@@ -33,6 +33,14 @@ export interface Agent {
   updated_at?: string;
 }
 
+export interface AnalysisReport {
+  symptom?: { expected?: string; actual?: string; steps?: string[]; acceptance?: string[] };
+  open_questions?: string[];
+  hypotheses?: { description: string; evidence: string; status: 'confirmed' | 'rejected' }[];
+  root_cause?: string;
+  trigger_paths?: string[];
+}
+
 export interface AgentStatus {
   agent_id: string;
   name: string;
@@ -47,6 +55,10 @@ export interface AgentStatus {
   git_commit_hash?: string;
   modified_files?: string[];
   root_cause?: string;
+  confidence?: string;
+  analysis?: AnalysisReport;
+  repro?: { command?: string; reproduced?: boolean; exit_before?: number; not_reproducible_reason?: string; test_files?: string[] };
+  review?: { status?: string; summary?: string; findings?: { location: string; detail: string }[] };
   fix_summary?: string;
   error?: string;
   test_results?: { passed?: boolean; command?: string; exit_code?: number; output?: string };

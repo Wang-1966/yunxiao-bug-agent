@@ -46,32 +46,58 @@ class YunxiaoClient:
                 raise YunxiaoError("云效详情返回格式不符合预期")
             return item
 
-    async def set_bug_in_progress(self, bug_id):
+    async def _workflow_statuses(self, bug_id):
         item = await self.get_bug(bug_id)
         project_id = (item.get('space') or {}).get('id')
         type_id = (item.get('workitemType') or {}).get('id')
         if not project_id or not type_id:
-            raise YunxiaoError('云效缺陷缺少项目或工作项类型，无法解析处理中状态')
+            raise YunxiaoError('云效缺陷缺少项目或工作项类型，无法读取工作流状态')
         settings = self.settings
         root = f"/oapi/v1/projex/organizations/{quote(settings.yunxiao_org_id, safe='')}"
         async with httpx.AsyncClient(base_url=settings.yunxiao_api_base,
                                      headers={'x-yunxiao-token': settings.yunxiao_access_token}, timeout=30) as client:
             path = f"{root}/projects/{quote(project_id, safe='')}/workitemTypes/{quote(type_id, safe='')}/workflows"
             workflow = self._json(await self._request(client, 'GET', path))
-            statuses = workflow.get('statuses') if isinstance(workflow, dict) else None
-            if not isinstance(statuses, list):
-                raise YunxiaoError('云效工作流状态列表返回格式不符合预期')
-            targets = [s for s in statuses if isinstance(s, dict) and
-                       (s.get('displayName') or s.get('name')) == '处理中' and s.get('id')]
-            if len(targets) != 1:
-                raise YunxiaoError('云效工作流中未找到唯一的“处理中”状态，请检查项目工作流配置')
-            target_id = targets[0]['id']
-            if (item.get('status') or {}).get('id') != target_id:
+        statuses = workflow.get('statuses') if isinstance(workflow, dict) else None
+        if not isinstance(statuses, list):
+            raise YunxiaoError('云效工作流状态列表返回格式不符合预期')
+        return item, root, statuses
+
+    async def list_bug_status_names(self, bug_id):
+        _, _, statuses = await self._workflow_statuses(bug_id)
+        names = []
+        for status in statuses:
+            if not isinstance(status, dict) or not status.get('id'):
+                continue
+            name = (status.get('displayName') or status.get('name') or '').strip()
+            if name and name not in names:
+                names.append(name)
+        if not names:
+            raise YunxiaoError('云效工作流没有可用状态')
+        return names
+
+    async def set_bug_status(self, bug_id, status_name):
+        status_name = (status_name or '').strip()
+        if not status_name:
+            raise YunxiaoError('请选择云效状态')
+        item, root, statuses = await self._workflow_statuses(bug_id)
+        targets = [status for status in statuses if isinstance(status, dict) and status.get('id')
+                   and (status.get('displayName') or status.get('name')) == status_name]
+        if len(targets) != 1:
+            raise YunxiaoError(f'云效工作流中未找到唯一的“{status_name}”状态，请检查项目工作流配置')
+        target_id = targets[0]['id']
+        if (item.get('status') or {}).get('id') != target_id:
+            settings = self.settings
+            async with httpx.AsyncClient(base_url=settings.yunxiao_api_base,
+                                         headers={'x-yunxiao-token': settings.yunxiao_access_token}, timeout=30) as client:
                 await self._request(client, 'PUT', f"{root}/workitems/{quote(bug_id, safe='')}", json={'status': target_id})
-                item = await self.get_bug(bug_id)
-                if (item.get('status') or {}).get('id') != target_id:
-                    raise YunxiaoError('云效状态更新后尚未确认为“处理中”，请重试同步')
-            return {'status_id': target_id, 'source_status': '处理中'}
+            item = await self.get_bug(bug_id)
+            if (item.get('status') or {}).get('id') != target_id:
+                raise YunxiaoError(f'云效状态更新后尚未确认为“{status_name}”，请重试')
+        return {'status_id': target_id, 'source_status': status_name}
+
+    async def set_bug_in_progress(self, bug_id):
+        return await self.set_bug_status(bug_id, '处理中')
 
     async def list_my_bugs(self):
         settings = self.settings

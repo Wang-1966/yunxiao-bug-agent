@@ -388,7 +388,7 @@ class MultiAgentOrchestrator:
             runtime = self.agent_states.get(agent_id, {})
             state = runtime.get('state', {})
             # 输入快照保留原始正文和图片文件引用，不持久化图片 base64 或临时签名地址。
-            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'proposals', 'selected_proposal', 'fix_summary', 'modified_files', 'test_results', 'error', 'failed_node', 'repair_feedback', 'previous_attempt') if key in state}
+            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'analysis', 'repro', 'review', 'proposals', 'selected_proposal', 'fix_summary', 'modified_files', 'test_results', 'error', 'failed_node', 'repair_feedback', 'previous_attempt') if key in state}
             result['progress'] = runtime.get('progress', 0)
             result['input_snapshot'] = state.get('input_snapshot', task.input_snapshot)
             # 文字观察和正文指纹单独保存；续跑按快照文件引用读取原图。
@@ -453,6 +453,7 @@ class MultiAgentOrchestrator:
         task = Task(task_id=history['task_id'], bug_id=bug['bug_id'], priority=0, created_at=datetime.now(), status='running')
         state = {**saved, 'bug_id': task.bug_id, 'bug_info': {}, 'stage': stage,
                  'root_cause': None if has_feedback else saved.get('root_cause'),
+                 'analysis': None if has_feedback else saved.get('analysis'), 'repro': None if has_feedback else saved.get('repro'),
                  'proposals': [] if has_feedback else proposals,
                  'selected_proposal': None if has_feedback else proposals[proposal_index],
                  'modified_files': [], 'test_results': {}, 'waiting_for_user': False,
@@ -480,7 +481,7 @@ class MultiAgentOrchestrator:
                 db.row_factory = aiosqlite.Row
                 row = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (task.bug_id,))).fetchone()
                 config = await resolve_project_config(db, dict(row))
-            state['bug_info'].update({key: config.get(key) for key in ('repo_path', 'branch', 'test_command')})
+            state['bug_info'].update({key: config.get(key) for key in ('repo_path', 'branch', 'test_command', 'preview_command', 'preview_env_files', 'preview_port')})
             workflow = compile_graph(create_bug_fix_graph(start_node=start_node))
             await self._run_agent_from_state(agent_id, task, state, workflow)
         except asyncio.CancelledError:
@@ -544,7 +545,7 @@ class MultiAgentOrchestrator:
             return 'verify_fix', '验证命令未能执行'
         if saved.get('selected_proposal'):
             return 'implement_fix', '已确认修复方案'
-        if saved.get('root_cause'):
+        if saved.get('root_cause') and saved.get('proposals'):
             return 'design_proposal', '已完成根因分析'
         return 'analyze_root_cause', '已创建修复工作树'
 
@@ -608,8 +609,8 @@ class MultiAgentOrchestrator:
                     input_snapshot=saved.get('input_snapshot') or {'supplement': supplement})
         if start_node != 'fetch_bug':
             cleared = {
-                'analyze_root_cause': {'root_cause': None, 'proposals': [], 'selected_proposal': None, 'modified_files': []},
-                'design_proposal': {'proposals': [], 'selected_proposal': None, 'modified_files': []},
+                'analyze_root_cause': {'root_cause': None, 'analysis': None, 'repro': None, 'review': None, 'proposals': [], 'selected_proposal': None, 'modified_files': []},
+                'design_proposal': {'selected_proposal': None, 'modified_files': []},
             }.get(start_node, {})
             previous_error = history['error'] or saved.get('error')
             task.resume_state = {

@@ -84,7 +84,7 @@ Bug ID 取前 8 个字符，运行 ID 取前 12 个字符；完整 Bug 标题仍
 
 ## 修复前补充信息
 
-点击 Bug 标题，在详情的富文本框中填写补充说明，直接粘贴截图到光标位置，也可将图片拖入编辑框，然后选择「保存补充信息」或「保存并开始修复」。支持加粗、斜体、列表、图片预览和删除，以及撤销与重做，无需单独上传文件。说明最多 12000 字，截图最多 4 张，单张不超过 5MB，支持 PNG、JPEG、WebP、GIF。
+点击 Bug 标题，在详情的富文本框中填写补充说明，直接粘贴截图到光标位置，也可将图片拖入编辑框，然后选择「保存补充信息」或「保存并开始修复」。支持加粗、斜体、列表、图片预览和删除，以及撤销与重做，无需单独上传文件。补充说明不设固定字数上限，截图最多 4 张，单张不超过 5MB，支持 PNG、JPEG、WebP、GIF。
 
 方案反馈和验收反馈共用同一富文本输入组件，反馈文字最多 4000 字，截图限制与补充说明一致。网页粘贴内容只保留支持的文字格式和实际携带的图片内容；网页远程图片需复制图片或截图后粘贴。
 
@@ -247,7 +247,7 @@ venv/bin/python -m uvicorn src.main:app --reload --reload-dir src --reload-exclu
 Bug 修复流程：
 
 ```
-fetch_bug → analyze_root_cause → [add_logging] → design_proposal → implement_fix → verify_fix
+fetch_bug → prepare_repository → analyze_root_cause（复现 + 审查）→ design_proposal → implement_fix（续接会话 + 审查）→ verify_fix（构建 + 复现测试）
 ```
 
 ### 4. WebSocket 实时通信

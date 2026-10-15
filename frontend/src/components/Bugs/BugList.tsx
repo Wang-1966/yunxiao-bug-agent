@@ -18,10 +18,67 @@ import BugLink from './BugLink';
 import BugDetail from './BugDetail';
 import RepairReview from '../Agents/RepairReview';
 import type { Bug } from '../../types';
-import { getStatusLabel, repairStatusLabels } from '../../utils/statusLabels';
+import { getStatusLabel, repairStatusLabels, sourceStatusClass } from '../../utils/statusLabels';
 
 const { Search } = Input;
 const { Option } = Select;
+const HIDDEN_YUNXIAO = ['已修复', '已关闭', '暂不修复'];
+
+function errorDetail(error: unknown, fallback: string) {
+  const detail = axios.isAxiosError(error) ? error.response?.data?.detail : undefined;
+  return typeof detail === 'string' ? detail : fallback;
+}
+
+function YunxiaoStatusCell({ bug, onChanged }: { bug: Bug; onChanged: (status: string) => void }) {
+  const current = bug.source_status || '';
+  const [options, setOptions] = useState<string[]>(current ? [current] : []);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (bug.source !== 'yunxiao') return <>-</>;
+  return (
+    <span className={sourceStatusClass(current || '其他')}>
+      <Select
+        className="yunxiao-status-select"
+        variant="borderless"
+        size="small"
+        aria-label={`修改云效状态：${bug.title}`}
+        value={current || undefined}
+        placeholder="选择状态"
+        popupMatchSelectWidth={false}
+        loading={busy}
+        open={open}
+        options={options.map((status) => ({ value: status, label: status }))}
+        onDropdownVisibleChange={async (visible) => {
+          setOpen(visible);
+          if (!visible || options.length > 1) return;
+          setBusy(true);
+          try {
+            const names = await bugService.yunxiaoStatuses(bug.bug_id);
+            setOptions(current && !names.includes(current) ? [current, ...names] : names);
+          } catch (error) {
+            message.error(errorDetail(error, '读取云效状态失败'));
+            setOpen(false);
+          } finally {
+            setBusy(false);
+          }
+        }}
+        onChange={async (status) => {
+          if (status === current) return;
+          setBusy(true);
+          try {
+            const result = await bugService.updateYunxiaoStatus(bug.bug_id, status);
+            onChanged(result.source_status);
+            message.success(`云效状态已改为${result.source_status}`);
+          } catch (error) {
+            message.error(errorDetail(error, '修改云效状态失败'));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
+    </span>
+  );
+}
 
 const BugList: React.FC = () => {
   const [bugs, setBugs] = useState<Bug[]>([]);
@@ -90,11 +147,17 @@ const BugList: React.FC = () => {
     setSyncing(true);
     try {
       const result = await bugService.sync();
-      message.success(`同步 ${result.total} 条：新增 ${result.created}，更新 ${result.updated}，无变化 ${result.unchanged}`);
+      message.success(
+        `同步 ${result.total} 条：新增 ${result.created}，更新 ${result.updated}，无变化 ${result.unchanged}`,
+      );
       await loadBugs();
       await loadSourceStatuses();
     } catch (error) {
-      message.error(axios.isAxiosError(error) ? error.response?.data?.detail || '同步失败，请检查网络或后端服务' : '同步失败');
+      message.error(
+        axios.isAxiosError(error)
+          ? error.response?.data?.detail || '同步失败，请检查网络或后端服务'
+          : '同步失败',
+      );
       console.error(error);
     } finally {
       setSyncing(false);
@@ -102,9 +165,19 @@ const BugList: React.FC = () => {
   };
 
   const changeDetails = (bugId: string | null) => {
-    const change = () => { setDetailBugId(bugId); setDetailDirty(false); };
+    const change = () => {
+      setDetailBugId(bugId);
+      setDetailDirty(false);
+    };
     if (bugId === detailBugId) return;
-    if (detailDirty) Modal.confirm({ title: '补充信息尚未保存', content: '离开当前 Bug 将丢弃修改。', okText: '丢弃并离开', cancelText: '继续编辑', onOk: change });
+    if (detailDirty)
+      Modal.confirm({
+        title: '补充信息尚未保存',
+        content: '离开当前 Bug 将丢弃修改。',
+        okText: '丢弃并离开',
+        cancelText: '继续编辑',
+        onOk: change,
+      });
     else change();
   };
 
@@ -115,7 +188,9 @@ const BugList: React.FC = () => {
       message.success('任务已加入修复队列，可在 Agent 状态中查看进度');
       await loadBugs();
     } catch (error) {
-      message.error(axios.isAxiosError(error) ? error.response?.data?.detail || '提交任务失败' : '提交任务失败');
+      message.error(
+        axios.isAxiosError(error) ? error.response?.data?.detail || '提交任务失败' : '提交任务失败',
+      );
       console.error(error);
     } finally {
       setSubmitting((ids) => ids.filter((id) => id !== bugId));
@@ -144,17 +219,14 @@ const BugList: React.FC = () => {
     }
   };
 
-  const priorityColor = (priority: string) => {
-    switch (priority) {
-      case 'critical':
-        return 'red';
-      case 'important':
-        return 'orange';
-      case 'normal':
-        return 'blue';
-      default:
-        return 'default';
+  const priorityRender = (priority: string) => {
+    if (priority === 'critical') {
+      return <span className="bounty-badge bounty-critical">🔥 S级 · 关键</span>;
     }
+    if (priority === 'important') {
+      return <span className="bounty-badge bounty-important">⚡ A级 · 重要</span>;
+    }
+    return <span className="bounty-badge bounty-normal">📌 B级 · 普通</span>;
   };
 
   const statusColor = (status: string) => {
@@ -176,56 +248,76 @@ const BugList: React.FC = () => {
 
   const columns = [
     {
-      title: '标题',
+      title: '悬赏标题',
       dataIndex: 'title',
       key: 'title',
-      render: (_: string, bug: Bug) => <BugLink bug={bug} onClick={(event) => {
-        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-        event.preventDefault();
-        changeDetails(bug.bug_id);
-      }} />,
+      render: (_: string, bug: Bug) => (
+        <BugLink
+          bug={bug}
+          onClick={(event) => {
+            if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            changeDetails(bug.bug_id);
+          }}
+        />
+      ),
     },
     {
-      title: '优先级',
+      title: '悬赏等级',
       dataIndex: 'priority',
       key: 'priority',
-      width: 100,
-      render: (priority: string) => (
-        <Tag color={priorityColor(priority)}>{priority}</Tag>
-      ),
+      width: 130,
+      render: (priority: string) => priorityRender(priority),
     },
     {
       title: '云效项目',
       dataIndex: 'source_project',
       key: 'source_project',
       width: 160,
-      render: (project?: string) => project ? <Link to="/projects">{project}</Link> : '-',
+      render: (project?: string) => (project ? <Link to="/projects">{project}</Link> : '-'),
     },
     {
       title: '云效状态',
       dataIndex: 'source_status',
       key: 'source_status',
-      width: 120,
-      render: (status?: string) => status || '-',
+      width: 140,
+      render: (_: string | undefined, bug: Bug) => (
+        <YunxiaoStatusCell
+          bug={bug}
+          onChanged={(status) => {
+            if (HIDDEN_YUNXIAO.includes(status)) {
+              void loadBugs();
+            } else {
+              setBugs((items) => items.map((item) => (item.bug_id === bug.bug_id ? { ...item, source_status: status } : item)));
+            }
+            void loadSourceStatuses();
+          }}
+        />
+      ),
     },
     {
       title: '修复状态',
       dataIndex: 'status',
       key: 'status',
-      width: 120,
-      render: (status: Bug['status']) => (
-        <Tag color={statusColor(status)}>{getStatusLabel(status)}</Tag>
-      ),
+      width: 130,
+      render: (status: Bug['status']) => <Tag color={statusColor(status)}>{getStatusLabel(status)}</Tag>,
     },
     {
       title: '修复任务',
       key: 'repair_task',
       width: 140,
-      render: (_: unknown, record: Bug) => record.assigned_agent_id ? (
-        <Button type="link" size="small" onClick={() => setReviewAgent(record.assigned_agent_id!)}>
-          {record.status === 'awaiting_plan_confirmation' ? '审查修复方案' : record.status === 'awaiting_confirmation' ? '确认修复结果' : '查看修复任务'}
-        </Button>
-      ) : '-',
+      render: (_: unknown, record: Bug) =>
+        record.assigned_agent_id ? (
+          <Button type="link" size="small" onClick={() => setReviewAgent(record.assigned_agent_id!)}>
+            {record.status === 'awaiting_plan_confirmation'
+              ? '审查修复方案'
+              : record.status === 'awaiting_confirmation'
+                ? '确认修复结果'
+                : '查看修复任务'}
+          </Button>
+        ) : (
+          '-'
+        ),
     },
     {
       title: '操作',
@@ -234,19 +326,20 @@ const BugList: React.FC = () => {
       render: (_: any, record: Bug) => (
         <div className="bug-row-actions">
           <div>
-          {record.source === 'yunxiao' && record.source_url?.startsWith('https://devops.aliyun.com/') && (
-            <Button
-              type="link"
-              size="small"
-              icon={<ExportOutlined />}
-              href={record.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label={`在新标签页查看云效原单：${record.title}`}
-            >
-              云效原单
-            </Button>
-          )}
+            {record.source === 'yunxiao' &&
+              record.source_url?.startsWith('https://devops.aliyun.com/') && (
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<ExportOutlined />}
+                  href={record.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`在新标签页查看云效原单：${record.title}`}
+                >
+                  云效原单
+                </Button>
+              )}
           </div>
           <Button
             type="link"
@@ -254,7 +347,10 @@ const BugList: React.FC = () => {
             icon={<PlayCircleOutlined />}
             onClick={() => handleSubmitTask(record.bug_id)}
             loading={submitting.includes(record.bug_id)}
-            disabled={!['pending', 'failed'].includes(record.status) || ['已修复', '已关闭', '暂不修复'].includes(record.source_status || '')}
+            disabled={
+              !['pending', 'failed'].includes(record.status) ||
+              ['已修复', '已关闭', '暂不修复'].includes(record.source_status || '')
+            }
           >
             修复
           </Button>
@@ -265,79 +361,118 @@ const BugList: React.FC = () => {
 
   return (
     <div>
+      <div className="page-heading">
+        <div>
+          <div className="page-eyebrow">🎯 BUG BOUNTY BOARD</div>
+          <h1>Bug 悬赏榜</h1>
+          <p className="page-subtitle">
+            从阿里云效同步缺陷或手动录入悬赏，点击标题补充复现线索，一键派遣特工出击
+          </p>
+        </div>
+      </div>
+
       <div className="filter-toolbar">
-          <Search
-            placeholder="搜索 Bug"
-            aria-label="搜索 Bug"
-            onSearch={(value) => { setPage(1); setFilters({ ...filters, search: value }); }}
-            allowClear
-          />
-          <Select
-            placeholder="修复状态"
-            aria-label="筛选修复状态"
-            allowClear
-            onChange={(value) => { setPage(1); setFilters({ ...filters, status: value }); }}
-          >
-            {Object.entries(repairStatusLabels).map(([value, label]) => (
-              <Option key={value} value={value}>{label}</Option>
-            ))}
-          </Select>
-          <Select
-            placeholder="云效状态"
-            aria-label="筛选云效状态"
-            allowClear
-            options={sourceStatuses.map((status) => ({ value: status, label: status }))}
-            onChange={(value) => { setPage(1); setFilters({ ...filters, source_status: value }); }}
-          />
-          <Select
-            placeholder="优先级"
-            aria-label="筛选 Bug 优先级"
-            allowClear
-            onChange={(value) => { setPage(1); setFilters({ ...filters, priority: value }); }}
-          >
-            <Option value="critical">关键</Option>
-            <Option value="important">重要</Option>
-            <Option value="normal">普通</Option>
-          </Select>
+        <Search
+          placeholder="搜索 Bug"
+          aria-label="搜索 Bug"
+          onSearch={(value) => {
+            setPage(1);
+            setFilters({ ...filters, search: value });
+          }}
+          allowClear
+        />
+        <Select
+          placeholder="修复状态"
+          aria-label="筛选修复状态"
+          allowClear
+          onChange={(value) => {
+            setPage(1);
+            setFilters({ ...filters, status: value });
+          }}
+        >
+          {Object.entries(repairStatusLabels).map(([value, label]) => (
+            <Option key={value} value={value}>
+              {label}
+            </Option>
+          ))}
+        </Select>
+        <Select
+          placeholder="云效状态"
+          aria-label="筛选云效状态"
+          allowClear
+          options={sourceStatuses.map((status) => ({ value: status, label: status }))}
+          onChange={(value) => {
+            setPage(1);
+            setFilters({ ...filters, source_status: value });
+          }}
+        />
+        <Select
+          placeholder="优先级"
+          aria-label="筛选 Bug 优先级"
+          allowClear
+          onChange={(value) => {
+            setPage(1);
+            setFilters({ ...filters, priority: value });
+          }}
+        >
+          <Option value="critical">关键</Option>
+          <Option value="important">重要</Option>
+          <Option value="normal">普通</Option>
+        </Select>
         <div className="filter-toolbar-actions">
-          <Button icon={<SyncOutlined />} onClick={handleSync} loading={syncing}>从云效同步</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalVisible(true)}>创建 Bug</Button>
+          <Button icon={<SyncOutlined />} onClick={handleSync} loading={syncing}>
+            从云效同步
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalVisible(true)}>
+            创建 Bug
+          </Button>
         </div>
       </div>
       <section className="data-section">
-      <Table
-        scroll={{ x: 1070 }}
-        columns={columns}
-        dataSource={bugs}
-        rowKey="bug_id"
-        loading={loading}
-        pagination={{
-          current: page,
-          pageSize: pageSize,
-          total: total,
-          onChange: (p, ps) => {
-            setPage(p);
-            setPageSize(ps || 10);
-          },
-          showSizeChanger: true,
-          showTotal: (t) => `共 ${t} 条`,
-        }}
-      />
-      <Drawer
-        title="Bug 详情"
-        placement="right"
-        width="min(960px, 100vw)"
-        maskClosable
-        styles={{ mask: { background: 'transparent' } }}
-        rootClassName="bug-detail-drawer"
-        open={detailBugId !== null}
-        onClose={() => changeDetails(null)}
-        destroyOnClose
-      >
-        {detailBugId && <BugDetail bugId={detailBugId} embedded onDirtyChange={setDetailDirty} onStarted={() => void loadBugs()} />}
-      </Drawer>
+        <Table
+          scroll={{ x: 1070 }}
+          columns={columns}
+          dataSource={bugs}
+          rowKey="bug_id"
+          loading={loading}
+          pagination={{
+            current: page,
+            pageSize: pageSize,
+            total: total,
+            onChange: (p, ps) => {
+              setPage(p);
+              setPageSize(ps || 10);
+            },
+            showSizeChanger: true,
+            showTotal: (t) => `共 ${t} 条`,
+          }}
+        />
+        <Drawer
+          title="Bug 详情"
+          placement="right"
+          width="min(960px, 100vw)"
+          maskClosable
+          styles={{ mask: { background: 'transparent' } }}
+          rootClassName="bug-detail-drawer"
+          open={detailBugId !== null}
+          onClose={() => changeDetails(null)}
+          destroyOnClose
+        >
+          {detailBugId && (
+            <BugDetail
+              bugId={detailBugId}
+              embedded
+              onDirtyChange={setDetailDirty}
+              onStarted={() => void loadBugs()}
+            />
+          )}
+        </Drawer>
       </section>
-      <RepairReview agentId={reviewAgent} onClose={() => setReviewAgent(null)} onConfirmed={() => void loadBugs()} />
+      <RepairReview
+        agentId={reviewAgent}
+        onClose={() => setReviewAgent(null)}
+        onConfirmed={() => void loadBugs()}
+      />
 
       <Modal
         title="创建 Bug"
@@ -387,7 +522,11 @@ const BugList: React.FC = () => {
           <Form.Item name="branch" label="分支">
             <Input placeholder="main" />
           </Form.Item>
-          <Form.Item name="test_command" label="验证命令" rules={[{ required: true, message: '请输入本地验证命令' }]}>
+          <Form.Item
+            name="test_command"
+            label="验证命令"
+            rules={[{ required: true, message: '请输入本地验证命令' }]}
+          >
             <Input placeholder="pnpm install --frozen-lockfile && pnpm run build" />
           </Form.Item>
         </Form>

@@ -27,6 +27,9 @@ tree-sitter==0.23.2
 # Logging
 loguru==0.7.2
 
+# 预览页核对（需本机 Chrome，或再执行 python -m playwright install chromium）
+playwright==1.49.1
+
 # Testing
 pytest==8.3.3
 pytest-asyncio==0.24.0

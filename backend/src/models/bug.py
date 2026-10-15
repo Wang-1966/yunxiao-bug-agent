@@ -56,6 +56,10 @@ class BugListResponse(BaseModel):
     page_size: int = 20
 
 
+class YunxiaoStatusUpdate(BaseModel):
+    status: str = Field(min_length=1, max_length=40)
+
+
 class BugSupplementUpdate(BaseModel):
     notes: str = Field(default='', max_length=12000)
     images: list[str] = Field(default_factory=list, max_length=4)

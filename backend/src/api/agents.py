@@ -93,6 +93,10 @@ async def list_agents():
                     git_commit_hash=state.get('git_commit_hash'),
                     modified_files=state.get('modified_files', []),
                     root_cause=state.get('root_cause'),
+                    confidence=state.get('confidence'),
+                    analysis=state.get('analysis'),
+                    repro=state.get('repro'),
+                    review=state.get('review'),
                     fix_summary=state.get('fix_summary'),
                     test_results=state.get('test_results') or {},
                     error=state.get('error') or runtime.get('error'),
@@ -300,7 +304,7 @@ async def get_agent_proposal(agent_id: str):
             except (ValueError, OSError):
                 attempt['diff'] = '上一轮提交已不可用，仅能查看改动统计'
         attempt['diff'] = attempt['diff'] or attempt.get('diff_stat') or ''
-    return {'status': row['status'], 'previous_attempt': attempt, 'decision_id': row['decision_id'], 'decision_status': row['decision_status'], 'root_cause': result.get('root_cause'), 'proposals': result.get('proposals', []), 'feedback': result.get('repair_feedback', ''), 'user_choice': json.loads(row['user_choice']) if row['user_choice'] else None}
+    return {'status': row['status'], 'previous_attempt': attempt, 'decision_id': row['decision_id'], 'decision_status': row['decision_status'], 'root_cause': result.get('root_cause'), 'confidence': result.get('confidence'), 'analysis': result.get('analysis'), 'repro': result.get('repro'), 'review': result.get('review'), 'proposals': result.get('proposals', []), 'feedback': result.get('repair_feedback', ''), 'user_choice': json.loads(row['user_choice']) if row['user_choice'] else None}
 
 
 @router.post('/{agent_id}/proposal-confirmation')

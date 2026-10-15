@@ -46,6 +46,14 @@ def test_document_preserves_order_and_uses_file_references(tmp_path):
     assert saved['content'][1]['attrs'] == {'image_index': 0}
 
 
+def test_supplement_document_has_no_fixed_character_limit(tmp_path):
+    long_text = '补充说明' * 4000
+    doc = {'type': 'doc', 'content': [{'type': 'paragraph', 'content': [{'type': 'text', 'text': long_text}]}]}
+    text, _, saved = save_rich_input(str(tmp_path / 'app.db'), '', [], doc)
+    assert text == long_text
+    assert saved['content'][0]['content'][0]['text'] == long_text
+
+
 @pytest.mark.parametrize('bad', [
     {'type': 'doc', 'content': [{'type': 'image', 'attrs': {'image_index': 3}}]},
     {'type': 'doc', 'content': [{'type': 'image', 'attrs': {'image_index': True}}]},

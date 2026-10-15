@@ -25,6 +25,9 @@ class BugFixState(TypedDict):
     root_cause: Optional[str]
     confidence: str  # high, medium, low
     need_logging: bool
+    analysis: Optional[Dict[str, Any]]  # 症状契约、假设、触发路径
+    repro: Optional[Dict[str, Any]]  # 复现命令、测试文件及其哈希、修复前后结果
+    review: Optional[Dict[str, Any]]  # 最近一次独立审查结论
 
     # 方案设计
     proposals: List[Dict[str, Any]]

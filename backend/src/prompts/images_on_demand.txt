@@ -1,1 +1,0 @@
-可核对 $image_count 张 Bug 原图：{"action":"view_image","image":1}（编号从1开始）。已有文字观察时只在需要核对细节时使用；必须在该次看图响应中返回 image_observation 字符串，记录可见事实和不确定性供后续纯文本请求使用。

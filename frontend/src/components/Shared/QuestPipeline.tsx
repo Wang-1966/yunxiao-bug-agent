@@ -14,6 +14,8 @@ export interface QuestStep {
   key: string;
   title: string;
   subtitle: string;
+  /** 卡片上分行展示，避免在窄工位里被省略成单字 */
+  caption: [string, string];
   icon: React.ReactNode;
 }
 
@@ -22,30 +24,35 @@ export const QUEST_STEPS: QuestStep[] = [
     key: 'analyze',
     title: '线索侦察',
     subtitle: '拉取工作树与根因推理',
+    caption: ['拉取工作树', '根因推理'],
     icon: <SearchOutlined />,
   },
   {
     key: 'propose',
     title: '蓝图会审',
     subtitle: '生成方案与人工拍板',
+    caption: ['生成方案', '人工拍板'],
     icon: <BulbOutlined />,
   },
   {
     key: 'fix',
     title: '手术改码',
     subtitle: '实施补丁与修改文件',
+    caption: ['实施补丁', '修改文件'],
     icon: <ToolOutlined />,
   },
   {
     key: 'verify',
     title: '试炼验证',
     subtitle: '自动构建与测试闯关',
+    caption: ['自动构建', '测试闯关'],
     icon: <ExperimentOutlined />,
   },
   {
     key: 'confirm',
     title: '验收通关',
     subtitle: '人工审查与分支交付',
+    caption: ['人工审查', '分支交付'],
     icon: <TrophyOutlined />,
   },
 ];
@@ -115,25 +122,33 @@ export const QuestPipeline: React.FC<QuestPipelineProps> = ({
           }
 
           return (
-            <div key={step.key} className={`quest-step is-${stepStatus}`}>
-              <div className="quest-node">
-                {stepStatus === 'done' ? (
-                  <CheckOutlined />
-                ) : stepStatus === 'error' ? (
-                  <CloseOutlined />
-                ) : stepStatus === 'current' ? (
-                  <LoadingOutlined spin />
-                ) : (
-                  step.icon
-                )}
+            <div
+              key={step.key}
+              className={`quest-step is-${stepStatus}${idx < currentIndex ? ' has-filled-connector' : ''}`}
+              title={step.subtitle}
+            >
+              <div className="quest-step-rail">
+                <div className="quest-node">
+                  {stepStatus === 'done' ? (
+                    <CheckOutlined />
+                  ) : stepStatus === 'error' ? (
+                    <CloseOutlined />
+                  ) : stepStatus === 'current' ? (
+                    <LoadingOutlined spin />
+                  ) : (
+                    step.icon
+                  )}
+                </div>
               </div>
               <div className="quest-step-meta">
                 <div className="quest-step-title">{step.title}</div>
-                {!compact && <div className="quest-step-subtitle">{step.subtitle}</div>}
+                {!compact && (
+                  <div className="quest-step-subtitle">
+                    <span>{step.caption[0]}</span>
+                    <span>{step.caption[1]}</span>
+                  </div>
+                )}
               </div>
-              {idx < QUEST_STEPS.length - 1 && (
-                <div className={`quest-connector ${idx < currentIndex ? 'is-filled' : ''}`} />
-              )}
             </div>
           );
         })}

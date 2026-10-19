@@ -145,24 +145,6 @@ a { color: var(--primary); }
   border-radius: 10px;
   font-weight: 500;
 }
-.sidebar-squad-card {
-  margin: 16px 8px;
-  padding: 14px;
-  border-radius: 12px;
-  background: var(--surface-subtle);
-  border: 1px dashed var(--border-strong);
-  font-size: 12px;
-  color: var(--muted);
-  line-height: 1.55;
-}
-.squad-card-title {
-  color: var(--primary);
-  font-weight: 650;
-  margin-bottom: 6px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .sidebar-footer {
   margin-top: auto;
   padding: 18px 16px 0;
@@ -406,37 +388,62 @@ a { color: var(--primary); }
   50% { transform: translate(-2px, -2px) rotate(-5deg); }
 }
 
-/* 可视化闯关式修复流水线 (QuestPipeline) */
+/* 可视化闯关式修复流水线 (QuestPipeline)
+   五关等宽纵列：节点在上、标题和说明在下，避免横排把说明挤成单字省略号。 */
 .quest-pipeline {
+  --quest-node-size: 30px;
+  --quest-node-gap: 6px;
   margin: 14px 0;
-  padding: 14px 16px;
+  padding: 12px 8px 10px;
   border-radius: 12px;
   background: var(--surface-subtle);
   border: 1px solid var(--border);
 }
 .quest-pipeline.is-compact {
+  --quest-node-size: 26px;
   margin: 10px 0;
-  padding: 10px 12px;
+  padding: 10px 6px 8px;
 }
 .quest-steps {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: start;
 }
 .quest-step {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  flex: 1;
   min-width: 0;
+  text-align: center;
 }
-.quest-step:last-child {
-  flex: 0 0 auto;
+.quest-step-rail {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: var(--quest-node-size);
+}
+.quest-step:not(:last-child) .quest-step-rail::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: calc(50% + (var(--quest-node-size) / 2) + var(--quest-node-gap));
+  width: calc(100% - var(--quest-node-size) - (var(--quest-node-gap) * 2));
+  height: 2px;
+  background: var(--border);
+  border-radius: 2px;
+  transform: translateY(-50%);
+  z-index: 0;
+}
+.quest-step.has-filled-connector:not(:last-child) .quest-step-rail::after {
+  background: #16A34A;
 }
 .quest-node {
-  width: 30px;
-  height: 30px;
+  position: relative;
+  z-index: 1;
+  width: var(--quest-node-size);
+  height: var(--quest-node-size);
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -470,11 +477,14 @@ a { color: var(--primary); }
   color: #DC2626;
 }
 .quest-step-meta {
+  width: 100%;
   min-width: 0;
+  margin-top: 6px;
 }
 .quest-step-title {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 650;
+  line-height: 1.3;
   color: var(--text-main);
   white-space: nowrap;
 }
@@ -483,22 +493,13 @@ a { color: var(--primary); }
   font-weight: 500;
 }
 .quest-step-subtitle {
+  margin-top: 2px;
   font-size: 11px;
+  line-height: 1.35;
   color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.quest-connector {
-  flex: 1;
-  height: 2px;
-  min-width: 12px;
-  background: var(--border);
-  border-radius: 2px;
-  margin: 0 4px;
-}
-.quest-connector.is-filled {
-  background: #16A34A;
+.quest-step-subtitle span {
+  display: block;
 }
 @keyframes pulse-ring {
   0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.45); }
@@ -571,11 +572,6 @@ a { color: var(--primary); }
   border-radius: 999px;
   border: 1px solid currentColor;
   background: var(--surface-subtle);
-}
-.persona-specialty {
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 4px;
 }
 .workstation-progress-pill {
   min-width: 150px;
@@ -1135,7 +1131,7 @@ a { color: var(--primary); }
   .app-sidebar { max-width: none !important; width: 100% !important; flex: none !important; border-right: 0; }
   .sidebar-inner { padding: 16px 12px 8px; }
   .brand { padding: 0 8px 12px; }
-  .brand-caption, .nav-label, .sidebar-footer, .sidebar-squad-card { display: none; }
+  .brand-caption, .nav-label, .sidebar-footer { display: none; }
   .app-sidebar .ant-menu { display: flex; }
   .app-sidebar .ant-menu-item { flex: 1; min-width: 0; padding: 0 6px !important; margin: 0 2px; text-align: center; }
   .app-sidebar .ant-menu-item .anticon { display: none; }
@@ -1147,7 +1143,9 @@ a { color: var(--primary); }
   .metric { padding: 16px; min-height: 130px; }
   .metric-value { font-size: 28px; }
   .stage-grid { grid-template-columns: minmax(0, 1fr); }
-  .quest-steps { flex-wrap: wrap; }
+  .quest-pipeline { --quest-node-size: 26px; padding: 10px 4px 8px; }
+  .quest-step-title { font-size: 11px; }
+  .quest-step-subtitle { font-size: 10px; }
   .filter-toolbar .ant-input-search { width: 100%; }
   .filter-toolbar .ant-select { flex: 1; }
   .ant-btn { min-height: 40px; }

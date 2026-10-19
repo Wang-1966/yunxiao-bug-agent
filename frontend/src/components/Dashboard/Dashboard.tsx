@@ -128,7 +128,7 @@ const Dashboard: React.FC = () => {
       <div className="page-heading">
         <div>
           <div className="page-eyebrow">⚡ SQUAD COMMAND CENTER</div>
-          <h1>仪表盘 · 作战室</h1>
+          <h1>仪表盘</h1>
           <p className="page-subtitle">
             实时总览云效悬赏池、特工队工位闯关进度与战果统计
           </p>

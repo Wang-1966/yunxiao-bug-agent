@@ -15,7 +15,7 @@ import {
 } from '@ant-design/icons';
 import type { AgentStatus, Bug } from '../../types';
 import { getStatusLabel } from '../../utils/statusLabels';
-import { AgentAvatar, getAgentMood, resolveAgentPersona } from '../Shared/AgentAvatar';
+import { AgentAvatar, resolveAgentPersona } from '../Shared/AgentAvatar';
 import { QuestPipeline } from '../Shared/QuestPipeline';
 import BugLink from '../Bugs/BugLink';
 import AgentTranscript from './AgentTranscript';
@@ -77,7 +77,6 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
     !compact && (agent.status === 'busy' || agent.status === 'error'),
   );
   const persona = resolveAgentPersona(agent.name);
-  const mood = getAgentMood(agent.status, agent.current_stage);
   const bug = agent.current_bug;
   const isWaitingAction =
     agent.status === 'awaiting_plan_confirmation' || agent.status === 'awaiting_confirmation';
@@ -117,7 +116,6 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
                 {persona.accessoryLabel} · {persona.roleTitle}
               </span>
             </div>
-            <p className="persona-specialty">{persona.specialty}</p>
           </div>
         </div>
 
@@ -139,16 +137,6 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
           />
         </div>
       </div>
-
-      {/* 独立通栏心情状态对话条（不挤压标题与简介） */}
-      {!compact && (
-        <div className={`workstation-speech-bar ${mood.moodClass}`}>
-          <span className="speech-bar-emoji" aria-hidden="true">
-            {mood.emoji}
-          </span>
-          <span className="speech-bar-text">{mood.bubbleText}</span>
-        </div>
-      )}
 
       {/* 闯关式五阶段修复流水线 */}
       <QuestPipeline

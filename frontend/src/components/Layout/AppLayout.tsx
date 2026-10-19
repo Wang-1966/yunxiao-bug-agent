@@ -7,7 +7,6 @@ import {
   RobotOutlined,
   SettingOutlined,
   FolderOutlined,
-  ThunderboltOutlined,
   SafetyOutlined,
 } from '@ant-design/icons';
 import { UI_THEMES, useThemeStore, type UIThemeMode } from '../../stores/themeStore';
@@ -25,7 +24,7 @@ const AppLayout: React.FC = () => {
     {
       key: '/',
       icon: <DashboardOutlined />,
-      label: '仪表盘 · 作战室',
+      label: '仪表盘',
     },
     {
       key: '/bugs',
@@ -80,15 +79,6 @@ const AppLayout: React.FC = () => {
             onClick={({ key }) => navigate(key)}
             style={{ border: 'none' }}
           />
-
-          <div className="sidebar-squad-card">
-            <div className="squad-card-title">
-              <ThunderboltOutlined /> 8 位修复特工在线
-            </div>
-            <p className="squad-card-desc">
-              夜猫子修修、咖啡因大夫、通宵啄木鸟等性格迥异的 Agent 在独立 Git Worktree 中并肩作战。
-            </p>
-          </div>
 
           <div className="sidebar-footer">
             <strong>Self-Healing Agent Yunxiao</strong>

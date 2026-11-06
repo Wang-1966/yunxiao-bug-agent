@@ -1,4 +1,6 @@
 """FastAPI 应用入口"""
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -51,17 +53,24 @@ async def lifespan(app: FastAPI):
     orchestrator = get_orchestrator()
     await orchestrator.start()
 
+    from .core.bug_sync import run_yunxiao_sync_loop
+    sync_task = asyncio.create_task(run_yunxiao_sync_loop(settings))
+    logger.info(f"云效自动同步已启动，间隔 {settings.yunxiao_sync_interval_seconds} 秒")
+
     logger.info("Application started successfully")
 
-    yield
-
-    # 关闭时执行
-    logger.info("Shutting down application...")
-    from .core.preview_manager import stop_all
     try:
-        await orchestrator.stop()
+        yield
     finally:
-        await stop_all()
+        # 关闭时执行
+        logger.info("Shutting down application...")
+        sync_task.cancel()
+        from .core.preview_manager import stop_all
+        try:
+            await orchestrator.stop()
+        finally:
+            await stop_all()
+            await asyncio.gather(sync_task, return_exceptions=True)
 
 
 app = FastAPI(

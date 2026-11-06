@@ -1,8 +1,14 @@
 """Import source fields without overwriting local repair state."""
+import asyncio
+
 import aiosqlite
+from loguru import logger
 from urllib.parse import quote
 
 from ..tools.yunxiao.openapi_client import YunxiaoClient, YunxiaoError
+
+# ponytail: 单进程锁；多个 API 进程同时同步时再拆开
+_sync_lock = asyncio.Lock()
 
 
 def source_priority(item):
@@ -20,7 +26,45 @@ def source_priority(item):
     return "normal"
 
 
+def _yunxiao_configured(settings):
+    return bool(settings.yunxiao_access_token and settings.yunxiao_org_id and settings.yunxiao_project_id)
+
+
 async def sync_my_bugs(settings):
+    async with _sync_lock:
+        return await _write_synced_bugs(settings)
+
+
+async def run_yunxiao_sync_loop(settings, sleep=asyncio.sleep):
+    if settings.yunxiao_sync_interval_seconds <= 0:
+        logger.info("云效自动同步已关闭")
+        return
+    missing_logged = False
+    while True:
+        interval = settings.yunxiao_sync_interval_seconds
+        if interval <= 0:
+            return
+        if not _yunxiao_configured(settings):
+            if not missing_logged:
+                logger.warning("云效未配置，自动同步暂停")
+                missing_logged = True
+        else:
+            missing_logged = False
+            try:
+                counts = await sync_my_bugs(settings)
+                logger.info(
+                    f"云效自动同步完成: total={counts['total']} created={counts['created']} updated={counts['updated']} unchanged={counts['unchanged']}"
+                )
+            except asyncio.CancelledError:
+                raise
+            except YunxiaoError as exc:
+                logger.warning(f"云效自动同步失败: {exc}")
+            except Exception:
+                logger.exception("云效自动同步失败")
+        await sleep(interval)
+
+
+async def _write_synced_bugs(settings):
     items = await YunxiaoClient(settings).list_my_bugs()
     counts = {"total": len(items), "created": 0, "updated": 0, "unchanged": 0}
     async with aiosqlite.connect(settings.database_url.replace("sqlite+aiosqlite:///", "")) as db:

@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     yunxiao_access_token: str = ""
     yunxiao_org_id: str = ""
     yunxiao_project_id: str = ""
+    yunxiao_sync_interval_seconds: int = 300
 
     class Config:
         env_file = ".env"

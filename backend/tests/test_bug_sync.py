@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import patch
 
@@ -6,7 +7,7 @@ import httpx
 import pytest
 
 from src.config import Settings
-from src.core.bug_sync import sync_my_bugs
+from src.core.bug_sync import run_yunxiao_sync_loop, sync_my_bugs
 from src.tools.yunxiao.openapi_client import YunxiaoClient, YunxiaoError
 
 
@@ -85,3 +86,68 @@ async def test_failure_does_not_report_success():
     with patch("src.tools.yunxiao.openapi_client.httpx.AsyncClient", side_effect=lambda **kw: original(transport=httpx.MockTransport(respond), **kw)):
         with pytest.raises(YunxiaoError, match="实际组织 ID"):
             await YunxiaoClient(Settings(_env_file=None, yunxiao_access_token="token", yunxiao_org_id="org", yunxiao_project_id="project")).list_my_bugs()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sync_does_not_overlap(tmp_path):
+    path = tmp_path / "db.sqlite"
+    async with aiosqlite.connect(path) as db:
+        await db.executescript(open("src/db/init.sql").read())
+    settings = Settings(_env_file=None, database_url=f"sqlite+aiosqlite:///{path}")
+    active = 0
+    peak = 0
+
+    async def fetch(_self):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return [{"id": "bug", "subject": "t", "description": "", "space": {"id": "project", "name": "项目"}}]
+
+    with patch.object(YunxiaoClient, "list_my_bugs", fetch):
+        await asyncio.gather(sync_my_bugs(settings), sync_my_bugs(settings))
+    assert peak == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_sync_retries_after_failure_and_waits_for_config():
+    settings = Settings(_env_file=None, yunxiao_sync_interval_seconds=300)
+    calls = []
+
+    async def fake(_settings):
+        calls.append("sync")
+        if len(calls) == 1:
+            raise YunxiaoError("down")
+        return {"total": 0, "created": 0, "updated": 0, "unchanged": 0}
+
+    async def sleep(_seconds):
+        if not settings.yunxiao_access_token:
+            settings.yunxiao_access_token = "t"
+            settings.yunxiao_org_id = "o"
+            settings.yunxiao_project_id = "p"
+            return
+        if len(calls) >= 2:
+            raise asyncio.CancelledError
+
+    with patch("src.core.bug_sync.sync_my_bugs", fake):
+        with pytest.raises(asyncio.CancelledError):
+            await run_yunxiao_sync_loop(settings, sleep=sleep)
+    assert calls == ["sync", "sync"]
+
+
+@pytest.mark.asyncio
+async def test_auto_sync_disabled_when_interval_not_positive():
+    settings = Settings(
+        _env_file=None,
+        yunxiao_sync_interval_seconds=0,
+        yunxiao_access_token="t",
+        yunxiao_org_id="o",
+        yunxiao_project_id="p",
+    )
+
+    async def fake(_settings):
+        raise AssertionError("should not sync")
+
+    with patch("src.core.bug_sync.sync_my_bugs", fake):
+        await run_yunxiao_sync_loop(settings, sleep=fake)

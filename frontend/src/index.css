@@ -341,51 +341,9 @@ a { color: var(--primary); }
   25% { transform: translateY(-4px) rotate(-4deg); }
   75% { transform: translateY(-2px) rotate(4deg); }
 }
-.avatar-scan-eyes {
-  animation: owl-eye-scan 2.4s ease-in-out infinite;
-}
-.avatar-peck {
-  transform-origin: 34px 50px;
-  animation: woodpecker-peck 0.8s ease-in-out infinite;
-}
-.avatar-steam {
-  animation: coffee-steam 1.8s ease-in-out infinite;
-}
-.avatar-orb {
-  transform-origin: 62px 48px;
-  animation: breakpoint-pulse 1.5s ease-in-out infinite;
-}
-.avatar-sparkle {
-  animation: sparkle-twinkle 2s ease-in-out infinite alternate;
-}
-.avatar-magnifier {
-  transform-origin: 54px 46px;
-  animation: magnifier-scan 2.2s ease-in-out infinite;
-}
-@keyframes owl-eye-scan {
-  0%, 100% { transform: translateX(0); }
-  30% { transform: translateX(-1.8px); }
-  70% { transform: translateX(1.8px); }
-}
-@keyframes woodpecker-peck {
-  0%, 100% { transform: rotate(0deg); }
-  50% { transform: rotate(6deg) translateX(2px); }
-}
 @keyframes coffee-steam {
   0%, 100% { opacity: 0.35; transform: translateY(0); }
   50% { opacity: 0.95; transform: translateY(-2px); }
-}
-@keyframes breakpoint-pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.16); }
-}
-@keyframes sparkle-twinkle {
-  0% { opacity: 0.45; }
-  100% { opacity: 1; }
-}
-@keyframes magnifier-scan {
-  0%, 100% { transform: translate(0, 0) rotate(0deg); }
-  50% { transform: translate(-2px, -2px) rotate(-5deg); }
 }
 
 /* 可视化闯关式修复流水线 (QuestPipeline)
@@ -1155,3 +1113,290 @@ a { color: var(--primary); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Agent 办公室视图 (AgentOffice) */
+.office-layout {
+  --office-floor: #FBFAF7;
+  --office-floor-line: rgba(31, 25, 21, 0.045);
+  --office-wall: #F1EEE8;
+  --office-desk: #FFFFFF;
+  --office-desk-side: #E9E4DC;
+  --office-chair: #4B4540;
+  --office-monitor: #2B2622;
+  --office-screen-off: #3A3430;
+  --office-line: #D4CBBF;
+  --office-soft: #ECE7DF;
+  --office-wood: #C9A27E;
+  --office-sofa: #E8B79F;
+  --office-sofa-dark: #D99A7E;
+  --office-stroke: rgba(31, 25, 21, 0.12);
+  --office-stroke-width: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 20px;
+  align-items: start;
+}
+:root[data-theme='arcade'] .office-layout {
+  --office-floor: #FFF8E7;
+  --office-floor-line: rgba(24, 21, 18, 0.07);
+  --office-wall: #FFE8D6;
+  --office-desk: #FFFFFF;
+  --office-desk-side: #FFD9A8;
+  --office-chair: #181512;
+  --office-monitor: #181512;
+  --office-screen-off: #2A2520;
+  --office-line: #181512;
+  --office-soft: #FFE1B3;
+  --office-wood: #E8A04A;
+  --office-sofa: #E85D3F;
+  --office-sofa-dark: #C9472C;
+  --office-stroke: #181512;
+  --office-stroke-width: 1.6;
+}
+:root[data-theme='cyber'] .office-layout {
+  --office-floor: #0F1726;
+  --office-floor-line: rgba(56, 189, 248, 0.07);
+  --office-wall: #152036;
+  --office-desk: #1F2D48;
+  --office-desk-side: #172238;
+  --office-chair: #0B111E;
+  --office-monitor: #0B111E;
+  --office-screen-off: #131C2E;
+  --office-line: #2A3B5C;
+  --office-soft: #1B2842;
+  --office-wood: #3B4D70;
+  --office-sofa: #3B3F86;
+  --office-sofa-dark: #2E3170;
+  --office-stroke: rgba(56, 189, 248, 0.28);
+  --office-stroke-width: 1;
+}
+/* Agent 形象（AgentMascot）：颜色写在组件里，这里只放动画 */
+.mascot-cup { fill: #FFFFFF; stroke: #D4CBBF; stroke-width: 1; }
+.mascot-steam { fill: none; stroke: #A8A29E; stroke-width: 1.2; stroke-linecap: round; animation: coffee-steam 1.8s ease-in-out infinite; }
+.agent-mascot .mascot-leg-l, .agent-mascot .mascot-leg-r, .agent-mascot .mascot-upper,
+.agent-mascot .mascot-type-l, .agent-mascot .mascot-type-r { transform-box: fill-box; transform-origin: center bottom; }
+.agent-mascot.is-walking .mascot-leg-l { animation: mascot-step 0.36s ease-in-out infinite alternate; }
+.agent-mascot.is-walking .mascot-leg-r { animation: mascot-step 0.36s ease-in-out infinite alternate-reverse; }
+.agent-mascot.is-walking .mascot-upper { animation: mascot-bob 0.18s ease-in-out infinite alternate; }
+.agent-mascot.is-running .mascot-leg-l, .agent-mascot.is-running .mascot-leg-r { animation-duration: 0.24s; }
+.agent-mascot.is-typing .mascot-type-l { animation: mascot-type 0.32s ease-in-out infinite alternate; }
+.agent-mascot.is-typing .mascot-type-r { animation: mascot-type 0.32s ease-in-out infinite alternate-reverse; }
+.mascot-visor-eyes { transform-box: fill-box; transform-origin: center; animation: mascot-blink 4.2s ease-in-out infinite; }
+.mascot-bulb { animation: mascot-bulb 2.4s ease-in-out infinite; }
+.agent-avatar-frame { background: color-mix(in srgb, var(--look, var(--primary)) 14%, var(--surface)); }
+.agent-avatar-svg { overflow: visible; }
+
+/* 办公室场景 */
+.office-scene { min-width: 0; min-height: 320px; border: var(--card-border-width) solid var(--border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); overflow: hidden; background: var(--office-floor); }
+.office-svg { display: block; width: 100%; height: auto; user-select: none; }
+.office-svg text { font-family: inherit; }
+.office-floor-fill { fill: var(--office-floor); }
+.office-tile-line { fill: none; stroke: var(--office-floor-line); stroke-width: 1; }
+.office-zone-floor { fill: var(--office-zone-floor, rgba(218, 119, 86, 0.04)); }
+:root[data-theme='cyber'] .office-layout { --office-zone-floor: rgba(56, 189, 248, 0.05); }
+.office-wall-line { stroke: var(--office-wall); stroke-width: 6; stroke-linecap: round; }
+
+/* 家具统一描边（排除角色、文字和特效） */
+.office-svg [class^='office-']:not(g):not(svg):not(text):not(.office-wall-line):not(.office-tile-line):not(.office-floor-fill):not(.office-zone-floor):not(.office-shadow):not(.office-spotlight):not(.office-steam):not(.office-progress-track):not(.office-progress-fill):not(.office-cursor):not(.office-code-line):not(.office-desk-hit):not(.office-actor-shadow) {
+  stroke: var(--office-stroke);
+  stroke-width: var(--office-stroke-width);
+}
+.office-chair-group rect, .office-chair-group circle { fill: var(--office-chair); stroke: var(--office-stroke); stroke-width: var(--office-stroke-width); }
+.office-chair-group .office-chair-back { fill: var(--office-chair-back, #6B625B); }
+.office-chair-group .office-chair-base { fill: none; stroke: var(--office-chair) !important; stroke-width: 3 !important; stroke-linecap: round; }
+:root[data-theme='arcade'] .office-layout { --office-chair-back: #E85D3F; }
+:root[data-theme='cyber'] .office-layout { --office-chair-back: #2A3B5C; }
+.office-wall { fill: var(--office-wall); stroke: none !important; }
+.office-desk-top, .office-counter-top { fill: var(--office-desk); }
+.office-desk-front, .office-desk-cabinet, .office-counter { fill: var(--office-desk-side); }
+.office-desk-leg { fill: var(--office-line); }
+.office-desk-line, .office-counter-line, .office-sofa-line, .office-window-bar { fill: none; }
+.office-monitor, .office-stand, .office-machine { fill: var(--office-monitor); }
+.office-screen { fill: var(--office-screen-off); transition: fill 0.3s ease; }
+.office-screen.screen-working { fill: #0F2A3D; }
+.office-screen.screen-waiting { fill: #3D2E0A; }
+.office-screen.screen-error { fill: #4A1414; animation: office-screen-flash 1.2s steps(2) infinite; }
+.office-screen.screen-idle { fill: #133B3A; }
+.office-screen.screen-sleeping { fill: #1E1B2E; }
+.office-mug { fill: var(--primary); }
+.office-mug-handle { fill: none; stroke: var(--primary) !important; stroke-width: 1.6 !important; }
+.office-steam { fill: none; stroke: var(--muted); stroke-width: 1.4; stroke-linecap: round; opacity: 0.55; animation: coffee-steam 1.8s ease-in-out infinite; }
+.office-progress-track { fill: var(--office-line); opacity: 0.5; }
+.office-progress-fill { fill: #3B82F6; transition: width 0.6s ease; }
+.office-spotlight { fill: rgba(245, 158, 11, 0.28); animation: office-glow 1.6s ease-in-out infinite; }
+.office-desk-hit { fill: transparent; transition: fill 0.2s ease; }
+.office-desk.is-owned { cursor: pointer; outline: none; }
+.office-desk.is-owned:hover .office-desk-hit, .office-desk.is-owned:focus-visible .office-desk-hit { fill: var(--primary-soft); }
+.office-desk.is-selected .office-desk-hit { fill: var(--primary-soft); stroke: var(--primary); stroke-width: 1.5; }
+.office-desk.is-empty { opacity: 0.6; }
+.office-desk, .office-actor { transition: opacity 0.25s ease, filter 0.25s ease; }
+.office-desk.is-dimmed, .office-actor.is-dimmed { opacity: 0.3; filter: grayscale(1); }
+
+/* 显示器内容与特效 */
+.office-code-line { fill: #60A5FA; transform-box: fill-box; transform-origin: left center; animation: office-code-type 2.4s ease-in-out infinite; }
+.office-code-line.l2 { animation-delay: 0.3s; }
+.office-code-line.l3 { animation-delay: 0.6s; }
+.office-code-line.l4 { animation-delay: 0.9s; }
+.office-code.stage-analyzing .office-code-line { fill: #38BDF8; }
+.office-code.stage-proposing .office-code-line { fill: #FBBF24; }
+.office-code.stage-fixing .office-code-line { fill: #4ADE80; }
+.office-code.stage-verifying .office-code-line, .office-code.stage-testing .office-code-line { fill: #C084FC; }
+.office-code.stage-queued .office-code-line { fill: #94A3B8; }
+.office-cursor { fill: #E2E8F0; animation: office-blink 1s steps(2) infinite; }
+.office-checklist path { fill: none; stroke: #FBBF24; stroke-width: 1.6; stroke-linecap: round; }
+.office-checklist rect { fill: #FBBF24; opacity: 0.8; }
+.office-alert { fill: #F87171; font-size: 22px; font-weight: 800; animation: office-blink 0.9s steps(2) infinite; }
+.office-saver { fill: #2DD4BF; stroke: none !important; animation: office-saver 3s ease-in-out infinite; }
+.office-sticky { fill: #FDE68A; }
+.office-sticky-line { fill: none; stroke: #B45309 !important; }
+.office-smoke circle { fill: rgba(120, 113, 108, 0.4); transform-box: fill-box; transform-origin: center; animation: office-smoke 2.4s ease-out infinite; }
+.office-smoke circle:nth-child(2) { animation-delay: 0.6s; }
+.office-smoke circle:nth-child(3) { animation-delay: 1.2s; }
+.office-dizzy { fill: #FBBF24; transform-box: fill-box; transform-origin: center; animation: office-wobble 1.2s ease-in-out infinite; }
+.office-zzz text { fill: var(--muted); font-size: 11px; font-weight: 700; animation: office-zzz 2.6s ease-in-out infinite; }
+.office-zzz text:nth-child(2) { font-size: 14px; animation-delay: 0.8s; }
+/* 休息区美术 */
+.office-clock, .office-frame { fill: var(--surface); }
+.office-clock-hand { fill: none; stroke: var(--text-main) !important; stroke-width: 1.5 !important; stroke-linecap: round; }
+.office-wood, .office-pot { fill: var(--office-wood); }
+.office-cup.cup-0 { fill: #B45309; }
+.office-cup.cup-1 { fill: #DA7756; }
+.office-cup.cup-2 { fill: #78350F; }
+.office-cup-white { fill: #FFFFFF; }
+.office-machine-screen { fill: #38BDF8; }
+.office-machine-spout { fill: var(--office-line); }
+.office-art-a { fill: #A7C4A0; }
+.office-art-b { fill: #7FA394; }
+.office-art-sun { fill: #F2B880; }
+.office-rug, .office-mat { fill: var(--office-soft); }
+.office-sofa-back, .office-sofa-arm { fill: var(--office-sofa-dark); }
+.office-sofa-seat { fill: var(--office-sofa); }
+.office-leaf { fill: #6FA36B; }
+.office-window { fill: #D6ECF7; }
+:root[data-theme='cyber'] .office-window { fill: #1E3A5F; }
+.office-treadmill-belt, .office-dumbbell { fill: var(--office-chair); }
+.office-treadmill-base, .office-dumbbell-bar { fill: var(--office-line); }
+.office-treadmill-post { fill: none; stroke: var(--office-line) !important; stroke-width: 3 !important; stroke-linecap: round; }
+.office-beanbag { fill: #8FB8DE; }
+
+/* 角色 */
+.office-actor { will-change: transform; }
+.office-actor-hit { cursor: pointer; outline: none; }
+.office-actor-shadow { fill: rgba(31, 25, 21, 0.12); }
+:root[data-theme='cyber'] .office-actor-shadow { fill: rgba(0, 0, 0, 0.4); }
+.office-actor-hit:hover .agent-mascot, .office-actor-hit:focus-visible .agent-mascot, .office-actor.is-selected .agent-mascot { filter: drop-shadow(0 0 3px var(--primary)) drop-shadow(0 0 1px var(--primary)); }
+.office-sway, .office-breathe, .office-hop, .office-stretch, .office-doze { transform-box: fill-box; transform-origin: center bottom; }
+.office-sway { animation: office-sway 3.2s ease-in-out infinite; }
+.office-sway.is-alt { animation-duration: 2.6s; animation-direction: reverse; }
+.office-breathe { animation: office-breathe 3.6s ease-in-out infinite; }
+.office-hop { animation: office-hop 1.1s ease-in-out infinite; }
+.office-stretch { animation: office-stretch 2.4s ease-in-out infinite; }
+.office-doze { transform: rotate(-8deg); }
+
+/* SVG 胶囊名牌 / 气泡 */
+.office-pill rect { fill: var(--surface); stroke: var(--border); stroke-width: 1; }
+.office-pill text { fill: var(--text-main); font-weight: 600; }
+.office-pill.is-room text { fill: var(--muted); letter-spacing: 0.04em; }
+.office-pill.is-away text { fill: var(--muted); font-weight: 500; }
+.office-pill.is-empty rect { fill: transparent; stroke-dasharray: 3 3; }
+.office-pill.is-empty text { fill: var(--muted); font-weight: 500; }
+.office-pill.is-actor { pointer-events: none; }
+.office-bubble rect, .office-bubble path { fill: var(--surface); stroke: var(--border); stroke-width: 1; }
+.office-bubble path { stroke: none; }
+.office-bubble text { fill: var(--text-main); font-size: 11px; }
+.office-bubble.is-working text { fill: #2563EB; }
+:root[data-theme='cyber'] .office-bubble.is-working text { fill: #7DD3FC; }
+.office-bubble.is-error text { fill: #DC2626; }
+:root[data-theme='cyber'] .office-bubble.is-error text { fill: #FCA5A5; }
+.office-bubble.is-muted text { fill: var(--muted); }
+.office-bubble.is-action { cursor: pointer; outline: none; animation: office-bubble-bounce 1.1s ease-in-out infinite; }
+.office-bubble.is-action rect, .office-bubble.is-action path { fill: #F59E0B; stroke: #D97706; }
+.office-bubble.is-action text { fill: #FFFFFF; font-weight: 700; }
+.office-bubble.is-action:hover rect, .office-bubble.is-action:focus-visible rect { fill: #D97706; }
+
+/* 右侧动态面板 */
+.office-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px;
+  background: var(--surface);
+  border: var(--card-border-width) solid var(--border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+}
+.office-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.office-stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; background: var(--surface-subtle); border: 1px solid var(--border); }
+.office-stat span { font-size: 12px; color: var(--muted); }
+.office-stat strong { font-size: 24px; line-height: 1.2; color: var(--text-main); font-variant-numeric: tabular-nums; }
+.office-stat.stat-working strong { color: #3B82F6; }
+.office-stat.stat-waiting strong { color: #D97706; }
+.office-stat.stat-error strong { color: #DC2626; }
+:root[data-theme='cyber'] .office-stat.stat-error strong { color: #F87171; }
+.office-panel-title { font-size: 14px; }
+.office-feed { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; max-height: 560px; overflow-y: auto; }
+.office-feed-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.2s ease, opacity 0.25s ease;
+}
+.office-feed-item:hover, .office-feed-item.is-selected { background: var(--surface-subtle); }
+.office-feed-item.pose-waiting { box-shadow: inset 3px 0 0 #F59E0B; }
+.office-feed-item.pose-error { box-shadow: inset 3px 0 0 #EF4444; }
+.office-feed-item.is-dimmed { opacity: 0.4; }
+.office-feed-item .agent-mood-badge { display: none; }
+.office-feed-body { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.office-feed-top { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+.office-feed-top strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text-main); }
+.office-feed-status { flex: none; font-size: 12px; color: var(--muted); }
+.office-feed-status.pose-working { color: #3B82F6; }
+.office-feed-status.pose-waiting { color: #D97706; }
+.office-feed-status.pose-error { color: #DC2626; }
+.office-feed-bug { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.office-feed-empty { color: var(--muted); font-size: 13px; }
+.office-tip { display: grid; gap: 2px; max-width: 280px; }
+.office-tip span { opacity: 0.85; font-size: 12px; }
+
+/* 工位详情抽屉里复用工位卡片，去掉卡片外框 */
+.agent-workstation-drawer .workstation-card { padding: 0; border: 0; box-shadow: none; background: transparent; }
+.agent-workstation-drawer .workstation-card:hover { transform: none; box-shadow: none; }
+
+@media (max-width: 1360px) {
+  .office-layout { grid-template-columns: minmax(0, 1fr); }
+  .office-panel { order: -1; }
+  .office-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .office-feed { max-height: 220px; }
+}
+@media (max-width: 640px) {
+  .office-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@keyframes office-screen-flash { 0% { fill: #4A1414; } 100% { fill: #7F1D1D; } }
+@keyframes office-glow { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+@keyframes office-hop { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-5px); } }
+@keyframes office-code-type { 0% { transform: scaleX(0.15); } 45%, 100% { transform: scaleX(1); } }
+@keyframes office-blink { 0% { opacity: 1; } 100% { opacity: 0.2; } }
+@keyframes office-saver { 0%, 100% { transform: translate(-12px, -6px); } 50% { transform: translate(12px, 7px); } }
+@keyframes office-smoke { 0% { opacity: 0; transform: translateY(6px) scale(0.6); } 40% { opacity: 1; } 100% { opacity: 0; transform: translateY(-10px) scale(1.3); } }
+@keyframes office-zzz { 0% { opacity: 0; transform: translateY(4px); } 50% { opacity: 1; } 100% { opacity: 0; transform: translateY(-8px); } }
+@keyframes office-wobble { 0%, 100% { transform: rotate(-12deg); } 50% { transform: rotate(12deg); } }
+@keyframes office-sway { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(3deg); } }
+@keyframes office-breathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(0.96); } }
+@keyframes office-stretch { 0%, 100% { transform: scaleY(1) rotate(0deg); } 30% { transform: scaleY(1.06) rotate(-6deg); } 70% { transform: scaleY(1.06) rotate(6deg); } }
+@keyframes office-bubble-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes mascot-step { from { transform: translateY(0); } to { transform: translateY(-3px); } }
+@keyframes mascot-bob { from { transform: translateY(0); } to { transform: translateY(-1.5px); } }
+@keyframes mascot-blink { 0%, 94%, 100% { transform: scaleY(1); } 97% { transform: scaleY(0.15); } }
+@keyframes mascot-bulb { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+@keyframes mascot-type { from { transform: translateY(0); } to { transform: translateY(-2px); } }

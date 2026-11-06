@@ -20,7 +20,7 @@ import {
   ReloadOutlined,
   DeleteOutlined,
   DownOutlined,
-  AppstoreOutlined,
+  DesktopOutlined,
   BarsOutlined,
 } from '@ant-design/icons';
 import { agentService } from '../../services/agentService';
@@ -30,6 +30,7 @@ import BugDetail from '../Bugs/BugDetail';
 import RepairReview from './RepairReview';
 import AgentTranscript from './AgentTranscript';
 import { AgentWorkstationCard } from './AgentWorkstationCard';
+import { AgentOffice } from './AgentOffice';
 import { AgentAvatar } from '../Shared/AgentAvatar';
 import type { AgentStatus, Bug } from '../../types';
 import { getStatusLabel } from '../../utils/statusLabels';
@@ -43,7 +44,8 @@ const AgentList: React.FC = () => {
   const [reviewAgent, setReviewAgent] = useState<string | null>(null);
   const [detailBugId, setDetailBugId] = useState<string | null>(null);
   const [detailDirty, setDetailDirty] = useState(false);
-  const [viewMode, setViewMode] = useState<'cards' | 'table'>('cards');
+  const [viewMode, setViewMode] = useState<'office' | 'table'>('table');
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
 
   useEffect(() => {
@@ -109,6 +111,7 @@ const AgentList: React.FC = () => {
         try {
           await agentService.delete(agent.agent_id);
           setAgents((items) => items.filter((item) => item.agent_id !== agent.agent_id));
+          setSelectedAgentId((id) => (id === agent.agent_id ? null : id));
           message.success('Agent 已删除，Bug 已保留');
           await loadAgents();
         } catch (error) {
@@ -181,13 +184,15 @@ const AgentList: React.FC = () => {
     }
   };
 
-  const filteredAgents = agents.filter((agent) => {
+  const matchesFilter = (agent: AgentStatus) => {
     if (statusFilter === 'busy') return agent.status === 'busy';
     if (statusFilter === 'waiting')
       return ['awaiting_plan_confirmation', 'awaiting_confirmation'].includes(agent.status);
     if (statusFilter === 'error') return agent.status === 'error';
     return true;
-  });
+  };
+  const filteredAgents = agents.filter(matchesFilter);
+  const selectedAgent = agents.find((agent) => agent.agent_id === selectedAgentId);
 
   const columns = [
     {
@@ -418,9 +423,9 @@ const AgentList: React.FC = () => {
           />
           <Segmented
             value={viewMode}
-            onChange={(val) => setViewMode(val as 'cards' | 'table')}
+            onChange={(val) => setViewMode(val as 'office' | 'table')}
             options={[
-              { value: 'cards', icon: <AppstoreOutlined />, label: '工位卡片' },
+              { value: 'office', icon: <DesktopOutlined />, label: '办公室' },
               { value: 'table', icon: <BarsOutlined />, label: '紧凑表格' },
             ]}
           />
@@ -428,35 +433,14 @@ const AgentList: React.FC = () => {
       </div>
 
       <section className="data-section">
-        {viewMode === 'cards' ? (
-          filteredAgents.length > 0 ? (
-            <div className="workstation-grid">
-              {filteredAgents.map((agent) => (
-                <AgentWorkstationCard
-                  key={agent.agent_id}
-                  agent={agent}
-                  retrying={!!agent.current_bug && retryingBugs.includes(agent.current_bug.bug_id)}
-                  stopping={stoppingAgents.includes(agent.agent_id)}
-                  deleting={deletingAgents.includes(agent.agent_id)}
-                  onOpenBug={(bugId) => changeDetails(bugId)}
-                  onReview={(agentId) => setReviewAgent(agentId)}
-                  onRetry={(target, scratch) => void handleRetry(target, scratch)}
-                  onPause={(id) => void handlePause(id)}
-                  onResume={(id) => void handleResume(id)}
-                  onStop={(id) => void handleStop(id)}
-                  onDelete={(target) => confirmDelete(target)}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="fun-empty-box">
-              <div className="fun-empty-illustration">🛸✨</div>
-              <div className="fun-empty-title">当前筛选条件下没有对应的 Agent 工位</div>
-              <div className="fun-empty-desc">
-                可切换上方筛选标签，或前往 Bug 悬赏榜派发新的修复任务。
-              </div>
-            </div>
-          )
+        {viewMode === 'office' ? (
+          <AgentOffice
+            agents={agents}
+            isHighlighted={matchesFilter}
+            selectedId={selectedAgentId}
+            onSelect={setSelectedAgentId}
+            onReview={setReviewAgent}
+          />
         ) : (
           <Table
             scroll={{ x: 1070 }}
@@ -473,6 +457,35 @@ const AgentList: React.FC = () => {
         )}
       </section>
 
+      <Drawer
+        title={selectedAgent ? `${selectedAgent.name} 的工位` : 'Agent 工位'}
+        placement="right"
+        width="min(720px, 100vw)"
+        zIndex={990}
+        rootClassName="agent-workstation-drawer"
+        open={!!selectedAgent}
+        onClose={() => setSelectedAgentId(null)}
+        destroyOnClose
+      >
+        {selectedAgent && (
+          <AgentWorkstationCard
+            key={selectedAgent.agent_id}
+            agent={selectedAgent}
+            retrying={
+              !!selectedAgent.current_bug && retryingBugs.includes(selectedAgent.current_bug.bug_id)
+            }
+            stopping={stoppingAgents.includes(selectedAgent.agent_id)}
+            deleting={deletingAgents.includes(selectedAgent.agent_id)}
+            onOpenBug={(bugId) => changeDetails(bugId)}
+            onReview={(agentId) => setReviewAgent(agentId)}
+            onRetry={(target, scratch) => void handleRetry(target, scratch)}
+            onPause={(id) => void handlePause(id)}
+            onResume={(id) => void handleResume(id)}
+            onStop={(id) => void handleStop(id)}
+            onDelete={(target) => confirmDelete(target)}
+          />
+        )}
+      </Drawer>
       <Drawer
         title="Bug 详情"
         placement="right"

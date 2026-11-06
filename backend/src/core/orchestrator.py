@@ -21,14 +21,14 @@ from .bug_inputs import read_supplement
 settings = get_settings()
 
 AGENT_NICKNAMES = (
-    "夜猫子修修",
-    "咖啡因大夫",
-    "通宵啄木鸟",
-    "爱较真的补丁匠",
-    "戴眼镜的捉虫侠",
-    "零警告强迫症",
-    "断点旅行者",
-    "日志考古家",
+    "修复专员 A",
+    "修复专员 B",
+    "修复专员 C",
+    "修复专员 D",
+    "修复专员 E",
+    "修复专员 F",
+    "修复专员 G",
+    "修复专员 H",
 )
 
 

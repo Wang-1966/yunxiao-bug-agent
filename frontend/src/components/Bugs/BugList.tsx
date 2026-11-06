@@ -102,11 +102,12 @@ const BugList: React.FC = () => {
   const [form] = Form.useForm();
   const hasActiveTasks = bugs.some((bug) => ['analyzing', 'fixing', 'testing'].includes(bug.status));
 
-  const loadSourceStatuses = async () => {
+  const loadSourceStatuses = async (silent = false) => {
     try {
       setSourceStatuses(await bugService.sourceStatuses());
-    } catch {
-      message.error('加载云效状态筛选项失败');
+    } catch (error) {
+      if (!silent) message.error('加载云效状态筛选项失败');
+      console.error(error);
     }
   };
 
@@ -124,8 +125,16 @@ const BugList: React.FC = () => {
     return () => clearInterval(interval);
   }, [hasActiveTasks, page, pageSize, filters]);
 
-  const loadBugs = async () => {
-    setLoading(true);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      void loadBugs(true);
+      void loadSourceStatuses(true);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [page, pageSize, filters]);
+
+  const loadBugs = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const response = await bugService.list({
         page,
@@ -136,10 +145,10 @@ const BugList: React.FC = () => {
       setBugs(response.items || []);
       setTotal(response.total || 0);
     } catch (error) {
-      message.error('加载 Bug 列表失败');
+      if (!silent) message.error('加载 Bug 列表失败');
       console.error(error);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -366,7 +375,7 @@ const BugList: React.FC = () => {
           <div className="page-eyebrow">🎯 BUG BOUNTY BOARD</div>
           <h1>Bug 悬赏榜</h1>
           <p className="page-subtitle">
-            从阿里云效同步缺陷或手动录入悬赏，点击标题补充复现线索，一键派遣特工出击
+            服务运行期间会自动从云效同步缺陷，也可手动同步或录入悬赏。点击标题补充复现线索，一键派遣特工出击
           </p>
         </div>
       </div>
@@ -420,7 +429,7 @@ const BugList: React.FC = () => {
           <Option value="normal">普通</Option>
         </Select>
         <div className="filter-toolbar-actions">
-          <Button icon={<SyncOutlined />} onClick={handleSync} loading={syncing}>
+          <Button icon={<SyncOutlined />} onClick={handleSync} loading={syncing} title="后台会定时自动同步，点此立即同步">
             从云效同步
           </Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalVisible(true)}>

@@ -1,5 +1,6 @@
 import api from './api';
 import type { AgentLiveStream, AgentTranscriptEntry, RichInputNode } from '../types';
+import { assignAgentLooks } from '../utils/agentLooks';
 
 export interface PreviewStatus {
   status: 'stopped' | 'starting' | 'running' | 'failed';
@@ -15,6 +16,8 @@ export const agentService = {
   // 获取所有 Agent 状态
   async list() {
     const response = await api.get('/api/agents');
+    // 按全部 Agent 名称分配围巾颜色 + 配饰，保证同时在场的 Agent 不撞款
+    assignAgentLooks((response.data || []).map((agent: { name: string }) => agent.name));
     return response.data;
   },
 

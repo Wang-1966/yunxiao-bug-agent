@@ -60,16 +60,6 @@ IMAGE_FAILURE_GRACEFUL = True
 MAX_REQUEST_TIMEOUTS = 3
 
 
-# ============ 上下文管理 ============
-
-# 上下文压缩触发阈值（提前压缩）
-COMPACT_TRIGGER_CHARS = 200_000  # 原 300_000
-COMPACT_TARGET_CHARS = 100_000   # 原 150_000
-
-# 工具结果保留最近 N 条（原 6 条）
-COMPACT_KEEP_RECENT = 4
-
-
 # ============ 提示词优化 ============
 
 # 分析阶段提示词增强（新增）

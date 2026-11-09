@@ -1,11 +1,56 @@
 from pathlib import Path
 import sqlite3
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api import bugs
+from src.config import Settings
 from src.tools.yunxiao.openapi_client import YunxiaoClient
+
+
+@pytest.mark.parametrize('remote_status', ['已关闭', '处理中'])
+def test_sync_refreshes_tracked_bugs_after_owner_changes(tmp_path, monkeypatch, remote_status):
+    path = tmp_path / 'bugs.db'
+    with sqlite3.connect(path) as db:
+        db.executescript(Path('src/db/init.sql').read_text())
+        db.execute(
+            "INSERT INTO bugs (bug_id,title,priority,source,source_status,status,repo_path,branch,assigned_agent_id) "
+            "VALUES ('transferred','Bug','normal','yunxiao','待确认','pending','/repo','feature','agent')"
+        )
+        db.execute("INSERT INTO bugs (bug_id,title,priority,source) VALUES ('manual','Manual','normal','manual')")
+    monkeypatch.setattr(bugs, 'settings', Settings(_env_file=None, database_url=f'sqlite+aiosqlite:///{path}'))
+    fetched = []
+
+    async def search(self):
+        return []  # 转交他人后，该 Bug 不再出现在当前账号的负责人查询中。
+
+    async def detail(self, bug_id):
+        fetched.append(bug_id)
+        return {'id': bug_id, 'subject': 'Bug', 'categoryId': 'Bug',
+                'assignedTo': {'id': 'someone-else'}, 'status': {'name': remote_status},
+                'space': {'id': 'project', 'name': '项目'}}
+
+    monkeypatch.setattr(YunxiaoClient, 'list_my_bugs', search)
+    monkeypatch.setattr(YunxiaoClient, 'get_bug', detail)
+    app = FastAPI()
+    app.include_router(bugs.router)
+    client = TestClient(app)
+    response = client.post('/api/bugs/sync')
+    assert response.status_code == 200
+    assert response.json() == {'total': 1, 'created': 0, 'updated': 1, 'unchanged': 0}
+    refreshed = client.get('/api/bugs/transferred').json()
+    assert refreshed['source_status'] == remote_status
+    assert (refreshed['status'], refreshed['repo_path'], refreshed['branch'], refreshed['assigned_agent_id']) == (
+        'pending', '/repo', 'feature', 'agent',
+    )
+    visible = client.get('/api/bugs', params={'exclude_closed_yunxiao': True}).json()
+    assert {item['bug_id'] for item in visible['items']} == (
+        {'manual'} if remote_status == '已关闭' else {'manual', 'transferred'}
+    )
+    assert client.post('/api/bugs/sync').json() == {'total': 1, 'created': 0, 'updated': 0, 'unchanged': 1}
+    assert fetched == ['transferred', 'transferred']
 
 
 def test_source_status_filter_before_pagination(tmp_path, monkeypatch):

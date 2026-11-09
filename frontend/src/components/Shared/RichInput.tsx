@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Button, Image, Tooltip, message } from 'antd';
-import { BoldOutlined, ItalicOutlined, OrderedListOutlined, UnorderedListOutlined, UndoOutlined, RedoOutlined, DeleteOutlined } from '@ant-design/icons';
+import { BoldOutlined, ItalicOutlined, OrderedListOutlined, UnorderedListOutlined, UndoOutlined, RedoOutlined, DeleteOutlined, PaperClipOutlined } from '@ant-design/icons';
 import { EditorContent, NodeViewWrapper, ReactNodeViewRenderer, generateJSON, useEditor } from '@tiptap/react';
 import type { Editor, JSONContent, NodeViewProps } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
@@ -43,18 +44,22 @@ interface Props {
   onChange: (value: RichInputValue) => void;
   placeholder: string;
   maxLength?: number;
+  variant?: 'default' | 'chat';
+  footer?: ReactNode;
   disabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
+  onSubmit?: () => void;
 }
 
-export default function RichInput({ id, value, onChange, placeholder, maxLength, disabled = false, onBusyChange }: Props) {
-  const callbacks = useRef({ onChange, onBusyChange, disabled });
-  callbacks.current = { onChange, onBusyChange, disabled };
+export default function RichInput({ id, value, onChange, placeholder, maxLength, disabled = false, onBusyChange, onSubmit, variant = 'default', footer }: Props) {
+  const callbacks = useRef({ onChange, onBusyChange, onSubmit, disabled });
+  callbacks.current = { onChange, onBusyChange, onSubmit, disabled };
   const [reading, setReading] = useState(false);
   const [characters, setCharacters] = useState(0);
   const [imageCount, setImageCount] = useState(value.images.length);
   const [, refreshToolbar] = useState(0);
   const editorRef = useRef<Editor | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const pending = useRef(false);
   const lastValue = useRef(JSON.stringify(value));
 
@@ -91,6 +96,13 @@ export default function RichInput({ id, value, onChange, placeholder, maxLength,
     immediatelyRender: true,
     editorProps: {
       attributes: { id, role: 'textbox', 'aria-multiline': 'true', 'aria-label': '文字和截图输入', spellcheck: 'false' },
+      handleKeyDown: (view, event) => {
+        if (!callbacks.current.onSubmit || event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
+        if (view.composing || event.isComposing || event.keyCode === 229) return false;
+        event.preventDefault();
+        if (!event.repeat && !pending.current && !callbacks.current.disabled) callbacks.current.onSubmit();
+        return true;
+      },
       handlePaste: (_view, event) => {
         if (pending.current || callbacks.current.disabled) return true;
         const current = editorRef.current;
@@ -163,14 +175,32 @@ export default function RichInput({ id, value, onChange, placeholder, maxLength,
     { label: '撤销', icon: <UndoOutlined />, active: false, unavailable: !editor.can().undo(), run: () => editor.chain().focus().undo().run() },
     { label: '重做', icon: <RedoOutlined />, active: false, unavailable: !editor.can().redo(), run: () => editor.chain().focus().redo().run() },
   ];
-  return <div className={`rich-input${disabled || reading ? ' is-disabled' : ''}`}>
-    <div className="rich-input-toolbar" role="toolbar" aria-label="文字格式">
+  return <div className={`rich-input${variant === 'chat' ? ' rich-input-chat' : ''}${disabled || reading ? ' is-disabled' : ''}`}>
+    {variant === 'default' && <div className="rich-input-toolbar" role="toolbar" aria-label="文字格式">
       {controls.map((control) => <Tooltip title={control.label} key={control.label}>
         <Button type={control.active ? 'primary' : 'text'} size="small" icon={control.icon} aria-label={control.label} aria-pressed={control.active}
           disabled={disabled || reading || control.unavailable} onMouseDown={(event) => event.preventDefault()} onClick={control.run} />
       </Tooltip>)}
-    </div>
+    </div>}
     <EditorContent editor={editor} />
-    <div className="rich-input-footer"><span>{reading ? '正在粘贴图片…' : '直接粘贴文字或截图，支持拖入图片'}</span><span>{characters}{maxLength ? `/${maxLength}` : ''} 字 · {imageCount}/{MAX_IMAGES} 张图</span></div>
+    {variant === 'default' ? <div className="rich-input-footer"><span>{reading ? '正在粘贴图片…' : '直接粘贴文字或截图，支持拖入图片'}</span><span>{characters}{maxLength ? `/${maxLength}` : ''} 字 · {imageCount}/{MAX_IMAGES} 张图</span></div> : (reading || (maxLength && characters >= maxLength * 0.9) || imageCount >= MAX_IMAGES) ? <div className="rich-input-chat-status" role="status">
+      {reading ? '正在读取图片…' : `${characters}${maxLength ? `/${maxLength}` : ''} 字 · ${imageCount}/${MAX_IMAGES} 张图`}
+    </div> : null}
+    {variant === 'chat' && <div className="rich-input-chat-footer">
+      <div className="rich-input-attachment">
+        <input ref={fileInputRef} type="file" hidden multiple accept={IMAGE_TYPES.join(',')} disabled={disabled || reading}
+          onChange={(event) => {
+            const files = Array.from(event.currentTarget.files || []);
+            event.currentTarget.value = '';
+            if (files.length) void insertImages(editor, files);
+          }} />
+        <Tooltip title="添加截图">
+          <Button type="text" icon={<PaperClipOutlined />} aria-label="添加截图" disabled={disabled || reading}
+            onMouseDown={(event) => event.preventDefault()} onClick={() => fileInputRef.current?.click()} />
+        </Tooltip>
+        <span className="rich-input-attachment-hint">粘贴或添加截图</span>
+      </div>
+      {footer}
+    </div>}
   </div>;
 }

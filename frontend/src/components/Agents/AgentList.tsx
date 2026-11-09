@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
+import { Link } from 'react-router-dom';
 import {
   Table,
   Tag,
@@ -7,15 +8,12 @@ import {
   Button,
   message,
   Modal,
-  Descriptions,
   Dropdown,
   Space,
   Drawer,
   Segmented,
 } from 'antd';
 import {
-  PauseCircleOutlined,
-  PlayCircleOutlined,
   StopOutlined,
   ReloadOutlined,
   DeleteOutlined,
@@ -28,7 +26,6 @@ import { bugService } from '../../services/bugService';
 import BugLink from '../Bugs/BugLink';
 import BugDetail from '../Bugs/BugDetail';
 import RepairReview from './RepairReview';
-import AgentTranscript from './AgentTranscript';
 import { AgentWorkstationCard } from './AgentWorkstationCard';
 import { AgentOffice } from './AgentOffice';
 import { AgentAvatar } from '../Shared/AgentAvatar';
@@ -63,24 +60,6 @@ const AgentList: React.FC = () => {
       console.error('Failed to load agents:', error);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handlePause = async (agentId: string) => {
-    try {
-      await agentService.pause(agentId);
-      loadAgents();
-    } catch (error) {
-      console.error('Failed to pause agent:', error);
-    }
-  };
-
-  const handleResume = async (agentId: string) => {
-    try {
-      await agentService.resume(agentId);
-      loadAgents();
-    } catch (error) {
-      console.error('Failed to resume agent:', error);
     }
   };
 
@@ -245,15 +224,21 @@ const AgentList: React.FC = () => {
       title: '进度',
       dataIndex: 'progress',
       key: 'progress',
-      render: (progress: number) => <Progress percent={progress} size="small" status="active" />,
+      width: 180,
+      render: (progress: number) => (
+        <div style={{ minWidth: 148 }}>
+          <Progress percent={progress} size="small" status="active" />
+        </div>
+      ),
     },
     {
       title: '操作',
       key: 'action',
-      width: 370,
+      width: 280,
       render: (_: any, record: AgentStatus) => (
         <div className="agent-row-actions">
           <div>
+            <Link to={`/agents/${encodeURIComponent(record.agent_id)}`}><Button size="small">打开会话</Button></Link>
             {record.worktree_path && (
               <Button
                 size="small"
@@ -312,34 +297,15 @@ const AgentList: React.FC = () => {
                   </Space.Compact>
                 );
               })()}
-            {record.status === 'busy' && (
-              <>
-                <Button
-                  size="small"
-                  icon={<PauseCircleOutlined />}
-                  onClick={() => handlePause(record.agent_id)}
-                >
-                  暂停
-                </Button>
-                <Button
-                  size="small"
-                  danger
-                  icon={<StopOutlined />}
-                  loading={stoppingAgents.includes(record.agent_id)}
-                  onClick={() => handleStop(record.agent_id)}
-                >
-                  停止
-                </Button>
-              </>
-            )}
-            {record.status === 'paused' && (
+            {['busy', 'paused'].includes(record.status) && (
               <Button
                 size="small"
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={() => handleResume(record.agent_id)}
+                danger
+                icon={<StopOutlined />}
+                loading={stoppingAgents.includes(record.agent_id)}
+                onClick={() => handleStop(record.agent_id)}
               >
-                恢复
+                停止
               </Button>
             )}
           </div>
@@ -358,33 +324,6 @@ const AgentList: React.FC = () => {
     },
   ];
 
-  const expandedRowRender = (record: AgentStatus) => {
-    return (
-      <div className="agent-logs">
-        {record.worktree_path && (
-          <Descriptions
-            title="修复结果"
-            column={1}
-            items={[
-              { key: 'worktree', label: '修改保存位置', children: record.worktree_path },
-              {
-                key: 'branch',
-                label: '修复分支',
-                children: record.repair_branch || '可在工作树中查看',
-              },
-              {
-                key: 'files',
-                label: '修改文件',
-                children: record.modified_files?.join('、') || '可在工作树中查看 Git diff',
-              },
-            ]}
-          />
-        )}
-        <h2>Agent 过程</h2>
-        <AgentTranscript agentId={record.agent_id} active={record.status === 'busy'} />
-      </div>
-    );
-  };
 
   return (
     <div>
@@ -448,10 +387,6 @@ const AgentList: React.FC = () => {
             dataSource={filteredAgents}
             rowKey="agent_id"
             loading={loading}
-            expandable={{
-              expandedRowRender,
-              rowExpandable: (record) => record.logs && record.logs.length > 0,
-            }}
             pagination={false}
           />
         )}
@@ -479,8 +414,6 @@ const AgentList: React.FC = () => {
             onOpenBug={(bugId) => changeDetails(bugId)}
             onReview={(agentId) => setReviewAgent(agentId)}
             onRetry={(target, scratch) => void handleRetry(target, scratch)}
-            onPause={(id) => void handlePause(id)}
-            onResume={(id) => void handleResume(id)}
             onStop={(id) => void handleStop(id)}
             onDelete={(target) => confirmDelete(target)}
           />

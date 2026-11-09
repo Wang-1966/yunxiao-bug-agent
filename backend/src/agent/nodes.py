@@ -165,6 +165,9 @@ async def analyze_root_cause_node(state: BugFixState) -> Dict[str, Any]:
         context = await repository_context(state['worktree_path'])
         visual = visual_prompt(visual_context)
         prompt = build_agent_prompt('analyze', state, **context) + visual
+        if state['bug_info'].get('assigned_agent_id'):
+            from ..core.conversation import history_context
+            prompt += await history_context(state['bug_info']['assigned_agent_id'])
         result = await run_analysis(
             llm, LLMFactory.create(stage="analyze"), state['worktree_path'], prompt, bug=review_bug(state), visual=visual,
             images=state['bug_info'].get('agent_images'), previous_attempt=state.get('previous_attempt'), preview=agent_preview(state),
@@ -286,20 +289,28 @@ def _should_require_user_confirmation(state: BugFixState, proposals: list, confi
     title = (bug_info.get('title') or '').lower()
     description = (bug_info.get('description') or '').lower()
 
+    analysis = state.get('analysis') or {}
+    classified = analysis.get('decision_schema_version') == 1
+    # 自动执行的是推荐的第一项，仅评估这一项实际将执行的操作。
+    impacts = [proposal.get('impact') for proposal in proposals[:1]]
+    impact_categories = {category for impact in impacts if isinstance(impact, dict) for category in impact.get('categories', [])}
+
     # 检查强制确认模式（优先级最高）
     for pattern in config.force_confirm_patterns:
         if re.search(pattern, title, re.IGNORECASE):
             state['confirmation_reason'] = f'匹配强制确认规则：{pattern}'
             return True
 
-    # 检查自动批准模式（优先级第二）
+    # 旧报告保留标题豁免；新报告依据实际风险，不让标题跳过决策。
     for pattern in config.auto_approve_patterns:
-        if re.search(pattern, title, re.IGNORECASE):
+        if not classified and re.search(pattern, title, re.IGNORECASE):
             logger.info(f"Auto-approved by pattern: {pattern}")
             return False
 
     reasons = []
     rules = config.rules
+    if classified and any(not isinstance(impact, dict) or not impact.get('evidence') or not isinstance(impact.get('categories'), list) for impact in impacts):
+        reasons.append('方案缺少实际改动风险评估')
 
     # 1. 检查置信度
     if rules.require_on_low_confidence:
@@ -308,7 +319,7 @@ def _should_require_user_confirmation(state: BugFixState, proposals: list, confi
             reasons.append('置信度低（无复现测试）')
 
     # 2. 检查方案数量
-    if rules.require_on_multiple_proposals:
+    if rules.require_on_multiple_proposals and not classified:
         if len(proposals) > rules.multiple_proposals_threshold:
             reasons.append(f'多个方案（{len(proposals)} 个）需要选择')
 
@@ -318,15 +329,19 @@ def _should_require_user_confirmation(state: BugFixState, proposals: list, confi
         if not repro.get('reproduced'):
             reasons.append('未能自动复现问题')
 
-    # 4. 检查风险级别
+    # 新报告按拟执行操作判断；旧报告保留关键词规则。
     if rules.require_on_high_risk:
-        analysis = state.get('analysis', {})
-        root_cause = (state.get('root_cause') or '').lower()
-        text_to_check = f"{title} {description} {root_cause}"
-
-        high_risk_found = [kw for kw in rules.high_risk_keywords if kw in text_to_check]
-        if high_risk_found:
-            reasons.append(f'高风险修改（涉及：{", ".join(high_risk_found[:2])}）')
+        if classified:
+            labels = {'data_deletion': '删除数据', 'permission_change': '权限变化', 'breaking_api': '不兼容接口',
+                      'external_side_effect': '外部副作用', 'product_behavior_change': '产品行为变化'}
+            risky = [label for category, label in labels.items() if category in impact_categories]
+            if risky:
+                reasons.append('方案涉及：' + '、'.join(risky))
+        else:
+            text_to_check = f"{title} {description} {state.get('root_cause') or ''}".lower()
+            found = [kw for kw in rules.high_risk_keywords if kw in text_to_check]
+            if found:
+                reasons.append(f'高风险修改（涉及：{", ".join(found[:2])}）')
 
     # 5. 检查改动范围
     if rules.require_on_large_changes:
@@ -338,7 +353,7 @@ def _should_require_user_confirmation(state: BugFixState, proposals: list, confi
     # 6. 检查是否有待确认问题
     if rules.require_on_open_questions:
         analysis = state.get('analysis', {})
-        open_questions = analysis.get('open_questions', []) if isinstance(analysis, dict) else []
+        open_questions = analysis.get('decision_questions' if classified else 'open_questions', []) if isinstance(analysis, dict) else []
         if open_questions:
             reasons.append(f'有待确认问题（{len(open_questions)} 个）')
 
@@ -348,14 +363,17 @@ def _should_require_user_confirmation(state: BugFixState, proposals: list, confi
         if priority == 'critical':
             reasons.append('关键 bug 需要人工确认')
 
-    # 8. 检查数据结构变更
+    # 持久化结构迁移才是结构变更，节点字段/模型名本身不是。
     if rules.require_on_schema_changes:
-        text_to_check = f"{title} {description} {state.get('root_cause', '')}".lower()
-        schema_found = [kw for kw in rules.schema_keywords if kw in text_to_check]
-        if schema_found:
-            reasons.append('涉及数据结构变更')
+        if classified:
+            if 'schema_migration' in impact_categories:
+                reasons.append('涉及持久化数据结构迁移')
+        else:
+            text_to_check = f"{title} {description} {state.get('root_cause', '')}".lower()
+            if any(kw in text_to_check for kw in rules.schema_keywords):
+                reasons.append('涉及数据结构变更')
 
-    # 决策逻辑：有任何不确定因素就需要确认
+    # 技术假设与验证范围说明不会单独触发暂停。
     need_confirmation = len(reasons) > 0
 
     if need_confirmation:
@@ -382,6 +400,9 @@ async def implement_fix_node(state: BugFixState) -> Dict[str, Any]:
         context = await repository_context(state['worktree_path'])
         visual = visual_prompt(visual_context)
         prompt = build_agent_prompt('fix', state, proposal=json.dumps(selected, ensure_ascii=False), repro=repro_text(state.get('repro'))) + visual
+        if bug.get('assigned_agent_id'):
+            from ..core.conversation import history_context
+            prompt += await history_context(bug['assigned_agent_id'])
         result = await run_fix(
             llm, LLMFactory.create(stage='analyze'), state['worktree_path'], prompt, bug=review_bug(state), analysis=state.get('analysis'), repro=state.get('repro'),
             visual=visual, images=bug.get('agent_images'), previous_attempt=state.get('previous_attempt'), instructions=context['instructions'], preview=agent_preview(state),

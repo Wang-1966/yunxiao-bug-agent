@@ -159,17 +159,39 @@ async def run_in_worktree(worktree, command: str, timeout: int = COMMAND_DEFAULT
         *args, cwd=str(root), env=command_env(), stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT, stdin=asyncio.subprocess.DEVNULL, start_new_session=True,
     )
+    # Bound memory while draining output, preserving both startup and final diagnostics.
+    output_limit = 8 * 1024 * 1024
+    head_limit = output_limit // 4
+    head, tail, total = bytearray(), bytearray(), 0
+
+    async def drain():
+        nonlocal total
+        while chunk := await process.stdout.read(65536):
+            total += len(chunk)
+            needed = max(0, head_limit - len(head))
+            head.extend(chunk[:needed])
+            tail.extend(chunk[needed:])
+            if len(tail) > output_limit - head_limit:
+                del tail[:len(tail) - (output_limit - head_limit)]
+
+    reader = asyncio.create_task(drain())
+    timed_out = False
     try:
-        output, _ = await asyncio.wait_for(process.communicate(), timeout)
+        await asyncio.wait_for(asyncio.gather(process.wait(), asyncio.shield(reader)), timeout)
     except asyncio.TimeoutError:
+        timed_out = True
         _kill(process)
         await process.wait()
-        return 124, f'命令超过 {timeout} 秒被终止'
     except asyncio.CancelledError:
         _kill(process)
-        await process.wait()
+        await asyncio.gather(process.wait(), reader)
         raise
-    return process.returncode, output.decode('utf-8', errors='replace')
+    await reader
+    omitted = f'\n[命令输出超过保留上限，省略 {total - output_limit} 字节]\n'.encode() if total > output_limit else b''
+    output = (head + omitted + tail).decode('utf-8', errors='replace')
+    if timed_out:
+        return 124, f'命令超过 {timeout} 秒被终止\n{output}'
+    return process.returncode, output
 
 
 def _kill(process):
@@ -577,8 +599,9 @@ def build_tools(workspace: Workspace, *, commands: bool = True, images: Optional
                 raise ToolError('command 不能为空')
             timeout = max(1, min(int(a.get('timeout') or COMMAND_DEFAULT_TIMEOUT), command_timeout_cap))
             code, output = await run_in_worktree(workspace.root, command, timeout, deny_read=workspace.deny_read)
-            return f'退出码：{code}\n{clip_output(output)}'
-        tools.append(Tool('run_command', f'在工作树根目录执行 shell 命令（沙箱：只能写入工作树和包管理器缓存，不能读取密钥目录，不能提交或改写 Git 引用）。用于运行测试、类型检查、构建、安装依赖。工作树初始没有 node_modules，运行测试前先按 package.json 与 AGENTS.md 安装依赖（较慢，请设置足够的 timeout）。默认超时 {COMMAND_DEFAULT_TIMEOUT} 秒，最长 {command_timeout_cap} 秒；输出过长会被截断。',
+            # Shared execution layer archives the result before producing a bounded preview.
+            return f'退出码：{code}\n{output}'
+        tools.append(Tool('run_command', f'在工作树根目录执行 shell 命令（沙箱：只能写入工作树和包管理器缓存，不能读取密钥目录，不能提交或改写 Git 引用）。用于运行测试、类型检查、构建、安装依赖。系统会在依赖配置一致且可安全隔离时从源仓库复制 node_modules；运行前检查依赖是否就绪，缺失时按 package.json 与 AGENTS.md 安装（较慢，请设置足够的 timeout）。私有包鉴权或环境缺失应明确报告，不要作为业务 Bug 的复现证据。默认超时 {COMMAND_DEFAULT_TIMEOUT} 秒，最长 {command_timeout_cap} 秒；输出过长会被截断。',
                           _schema({'command': {'type': 'string'}, 'timeout': {'type': 'integer', 'description': '超时秒数'}}, ['command']), run_command, readonly=False))
     if images:
         async def view_image(a):

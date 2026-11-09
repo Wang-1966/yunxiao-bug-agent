@@ -34,6 +34,10 @@ export interface Agent {
 }
 
 export interface AnalysisReport {
+  decision_schema_version?: number;
+  decision_questions?: { question: string; options: string[]; recommended_option: number; reason: string; investigated: string }[];
+  assumptions?: string[];
+  verification_limits?: string[];
   symptom?: { expected?: string; actual?: string; steps?: string[]; acceptance?: string[] };
   open_questions?: string[];
   hypotheses?: { description: string; evidence: string; status: 'confirmed' | 'rejected' }[];
@@ -76,7 +80,7 @@ export interface AgentTranscriptEntry {
   id: number;
   level: 'thinking' | 'assistant' | 'info' | 'warning' | 'error' | string;
   message: string;
-  metadata?: { label?: string; duration_ms?: number } | null;
+  metadata?: { label?: string; duration_ms?: number; conversation_message_id?: number } | null;
   created_at: string;
 }
 
@@ -87,6 +91,13 @@ export interface AgentLiveStream {
   content_chars: number;
   elapsed_ms: number;
   thinking_ms: number;
+  started_at?: number;
+}
+
+export interface AgentToolActivity {
+  tools: string[];
+  started_at: number;
+  elapsed_ms: number;
 }
 
 export interface LLMProvider {
@@ -96,6 +107,8 @@ export interface LLMProvider {
   base_url: string;
   api_key: string;
   available_models: string[];
+  context_windows?: Record<string, number>;
+  stream_usage?: boolean;
   default_model: string;
   enabled: boolean;
 }
@@ -170,4 +183,14 @@ export interface Decision {
   status: 'pending' | 'answered' | 'timeout';
   created_at?: string;
   answered_at?: string;
+}
+
+export interface ConversationMessage {
+  id: number;
+  agent_id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  images: string[];
+  status: 'queued' | 'delivered' | 'sent';
+  created_at: string;
 }

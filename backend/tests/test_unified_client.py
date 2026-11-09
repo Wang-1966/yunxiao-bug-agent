@@ -122,3 +122,19 @@ def test_response_summary_redacts_before_truncating_and_bounds_excerpts():
     excerpts = summary['response_prefix'] + summary['response_suffix']
     for value in (secret, 'credential', 'sk-test-key', 'hidden', 'base64,private'):
         assert value not in excerpts
+
+
+@pytest.mark.asyncio
+async def test_optional_usage_chunk_is_recorded_without_choices():
+    class UsageStream(FakeStream):
+        def __aiter__(self):
+            async def chunks():
+                yield SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=123, completion_tokens=45,
+                    total_tokens=168, prompt_tokens_details=SimpleNamespace(cached_tokens=80)))
+            return chunks()
+    client = UnifiedLLMClient(SimpleNamespace(id='test', api_key='key', base_url='http://example', stream_usage=True))
+    client.client.chat.completions.create = AsyncMock(return_value=UsageStream([]))
+    diagnostics = {}
+    await client.ainvoke([], 'model', on_response=diagnostics.update)
+    assert diagnostics['usage'] == {'input_tokens': 123, 'output_tokens': 45, 'total_tokens': 168, 'cached_tokens': 80}
+    assert client.client.chat.completions.create.await_args.kwargs['stream_options'] == {'include_usage': True}

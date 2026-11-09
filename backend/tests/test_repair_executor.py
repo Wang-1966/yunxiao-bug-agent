@@ -159,3 +159,63 @@ def test_edit_requires_a_read_and_rejects_business_files_during_analysis(reposit
     assert (repository / 'app.py').read_text().startswith('value = 1')
     files.edit_file('test_repro.py', '', 'assert False\n')
     assert (repository / 'test_repro.py').read_text() == 'assert False\n'
+
+
+@pytest.mark.asyncio
+async def test_worktree_copies_matching_dependencies_without_sharing_writes(repository):
+    (repository / 'package.json').write_text('{"dependencies":{"demo":"1.0.0"}}')
+    (repository / '.gitignore').write_text('node_modules/\n')
+    await executor.git(repository, 'add', 'package.json', '.gitignore')
+    await executor.git(repository, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'node project')
+    modules = repository / 'node_modules'
+    package = modules / '.pnpm/demo/node_modules/demo'
+    package.mkdir(parents=True)
+    (package / 'index.js').write_text('original')
+    (modules / 'demo').symlink_to('.pnpm/demo/node_modules/demo')
+    prepared = await executor.prepare_worktree({'repo_path': str(repository)})
+    worktree = Path(prepared['worktree_path'])
+    assert (worktree / 'node_modules/demo/index.js').read_text() == 'original'
+    (worktree / 'node_modules/demo/index.js').write_text('isolated')
+    assert (package / 'index.js').read_text() == 'original'
+    assert await executor.prepare_worktree_dependencies(repository, worktree) is False
+    assert (worktree / 'node_modules/demo/index.js').read_text() == 'isolated'
+    assert await executor.changed_files(worktree) == []
+
+
+@pytest.mark.asyncio
+async def test_dependency_copy_rejects_mismatch_and_external_links(repository, tmp_path):
+    prepared = await executor.prepare_worktree({'repo_path': str(repository)})
+    worktree = Path(prepared['worktree_path'])
+    for root in (repository, worktree):
+        (root / 'package.json').write_text('{"dependencies":{}}')
+        (root / '.gitignore').write_text('node_modules/\n')
+    modules = repository / 'node_modules'
+    modules.mkdir()
+    (repository / 'package.json').write_text('{"dependencies":{"other":"1"}}')
+    assert await executor.prepare_worktree_dependencies(repository, worktree) is False
+    (repository / 'package.json').write_text('{"dependencies":{}}')
+    (modules / 'external').symlink_to(tmp_path)
+    assert await executor.prepare_worktree_dependencies(repository, worktree) is False
+    assert not (worktree / 'node_modules').exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_dependency_copy_leaves_no_partial_install(repository, monkeypatch):
+    worktree = Path((await executor.prepare_worktree({'repo_path': str(repository)}))['worktree_path'])
+    for root in (repository, worktree):
+        (root / 'package.json').write_text('{}')
+        (root / '.gitignore').write_text('node_modules/\n')
+    (repository / 'node_modules').mkdir()
+    run = executor.run_process
+
+    async def fail_copy(args, cwd, **kwargs):
+        if args[0] == 'cp':
+            Path(args[-1]).mkdir()
+            (Path(args[-1]) / 'partial').write_text('incomplete')
+            return 1, 'copy failed'
+        return await run(args, cwd, **kwargs)
+
+    monkeypatch.setattr(executor, 'run_process', fail_copy)
+    assert await executor.prepare_worktree_dependencies(repository, worktree) is False
+    assert not (worktree / 'node_modules').exists()
+    assert not list(worktree.glob('.repair-deps-*'))

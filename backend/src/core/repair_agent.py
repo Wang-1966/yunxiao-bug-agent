@@ -16,10 +16,12 @@ from loguru import logger
 
 from ..config import get_settings
 from ..prompts import render_prompt
+from .analysis_decisions import ChangeImpact, DecisionQuestion, normalize_decisions
 from .agent_tools import (ToolError, Workspace, build_tools, clip_output, is_test_path, prefers_apply_patch, run_in_worktree, sandbox_available)
 from .browser_tool import close_browser
 from .repair_executor import changed_files, git
-from .tool_agent import load_session, run_tool_agent, save_session, session_path, submit_tool
+from .tool_agent import load_session, save_session, session_path, submit_tool
+from .agent_runtime import run_tool_agent
 
 REPRO_TIMEOUT = 600
 MAX_DIFF_CHARS = 40_000
@@ -43,6 +45,17 @@ def _strings(value, label, *, minimum=0) -> list:
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _check_reproduction_environment(code, output):
+    """明确的依赖启动错误不能充当目标症状的失败证据。"""
+    missing_dependency = ('Error [ERR_MODULE_NOT_FOUND]: Cannot find package ',
+                          'ModuleNotFoundError: No module named ',
+                          "browserType.launch: Executable doesn't exist")
+    if code and any(marker in output for marker in missing_dependency):
+        raise ToolError('复现环境依赖加载失败，尚不能判断业务 Bug 是否复现或修复。'
+                        '请先准备测试依赖；无法准备时应报告环境限制，不能将其记为已复现。输出：\n'
+                        + clip_output(output, 4000))
 
 
 def protected_dirs() -> list:
@@ -88,12 +101,13 @@ def _analysis_tool(workspace, worktree, holder):
                 raise ToolError('每个假设需要 description、evidence，且 status 为 confirmed 或 rejected')
             normalized.append({'description': _text(item.get('description'), 'hypothesis.description'), 'evidence': _text(item.get('evidence'), 'hypothesis.evidence'), 'status': item['status']})
         if not any(h['status'] == 'confirmed' for h in normalized):
-            raise ToolError('没有任何已证实（confirmed）的假设；请继续调查，或在 root_cause 中如实说明无法确定并把 open_questions 写清楚')
+            raise ToolError('没有任何已证实（confirmed）的假设；请继续调查，不要把技术定位工作转交给用户决策')
         root_cause = _text(args.get('root_cause'), 'root_cause')
         paths = _strings(args.get('trigger_paths') or [], 'trigger_paths')
         proposals = args.get('proposals')
         if not isinstance(proposals, list) or not proposals:
             raise ToolError('proposals 必须是非空数组')
+        decisions = normalize_decisions(args)
         clean = []
         for item in proposals:
             if not isinstance(item, dict):
@@ -101,6 +115,12 @@ def _analysis_tool(workspace, worktree, holder):
             clean.append({'name': _text(item.get('name'), 'proposal.name'), 'steps': _strings(item.get('steps'), 'proposal.steps', minimum=1),
                           'pros': _strings(item.get('pros') or [], 'proposal.pros'), 'cons': _strings(item.get('cons') or [], 'proposal.cons'),
                           'risks': str(item.get('risks') or '').strip()})
+            if decisions:
+                try:
+                    clean[-1]['impact'] = ChangeImpact.model_validate(item.get('impact')).model_dump()
+                except ValueError as exc:
+                    raise ToolError(f'每个方案必须提供实际改动 impact：{exc}') from exc
+                clean[-1]['files'] = _strings(item.get('files'), 'proposal.files', minimum=1)
         open_questions = _strings(args.get('open_questions') or [], 'open_questions')
 
         changed = await changed_files(worktree)
@@ -120,6 +140,7 @@ def _analysis_tool(workspace, worktree, holder):
                 if name not in changed or not is_test_path(name) or not workspace.resolve(name).is_file():
                     raise ToolError(f'复现测试文件 {name} 必须是本阶段新增或修改的测试文件（需存在于改动列表中）。当前改动：{", ".join(changed) or "无"}')
             code, output = await run_in_worktree(worktree, command, REPRO_TIMEOUT, deny_read=workspace.deny_read)
+            _check_reproduction_environment(code, output)
             if code == 0:
                 raise ToolError('复现命令在当前代码上通过了，说明测试没有复现这个 Bug。请让测试驱动真实行为并因症状而失败，再提交。命令输出：\n' + clip_output(output, 3000))
             if code == 124:
@@ -130,25 +151,28 @@ def _analysis_tool(workspace, worktree, holder):
             reason = _text(repro.get('not_reproducible_reason'), 'reproduction.not_reproducible_reason（没有复现命令时必须说明无法自动化复现的具体原因）')
             record['not_reproducible_reason'] = reason
         holder['analysis'] = {'symptom': symptom, 'open_questions': open_questions, 'hypotheses': normalized, 'root_cause': root_cause,
-                              'trigger_paths': paths, 'proposals': clean}
+                              'trigger_paths': paths, 'proposals': clean, **decisions}
         holder['repro'] = record
         return holder['analysis']
 
     hypothesis = {'type': 'object', 'properties': {'description': {'type': 'string'}, 'evidence': {'type': 'string', 'description': '文件:行号 与简述'}, 'status': {'type': 'string', 'enum': ['confirmed', 'rejected']}}, 'required': ['description', 'evidence', 'status']}
     proposal = {'type': 'object', 'properties': {'name': {'type': 'string'}, 'steps': {'type': 'array', 'items': {'type': 'string'}}, 'pros': {'type': 'array', 'items': {'type': 'string'}},
-                                                 'cons': {'type': 'array', 'items': {'type': 'string'}}, 'risks': {'type': 'string'}}, 'required': ['name', 'steps']}
+                                                 'cons': {'type': 'array', 'items': {'type': 'string'}}, 'risks': {'type': 'string'}, 'files': {'type': 'array', 'items': {'type': 'string'}}, 'impact': ChangeImpact.model_json_schema()}, 'required': ['name', 'steps', 'files', 'impact']}
     return submit_tool(
         'submit_analysis', '提交根因分析。系统会重新运行 reproduction.command，必须在当前代码上失败。业务源码不得有改动。',
         {'type': 'object', 'properties': {
             'symptom': {'type': 'object', 'properties': {'expected': {'type': 'string'}, 'actual': {'type': 'string'}, 'steps': {'type': 'array', 'items': {'type': 'string'}}, 'acceptance': {'type': 'array', 'items': {'type': 'string'}}},
                         'required': ['expected', 'actual', 'steps', 'acceptance']},
-            'open_questions': {'type': 'array', 'items': {'type': 'string'}},
+            'decision_questions': {'type': 'array', 'items': DecisionQuestion.model_json_schema(), 'description': '仅用户才能决定且实质影响方案的阻塞问题；先查代码、测试、文档。没有则 []。优先只问当前关键问题。'},
+            'assumptions': {'type': 'array', 'items': {'type': 'string'}, 'description': '有依据的兼容默认值，非阻塞，不要求用户逐项批准'},
+            'verification_limits': {'type': 'array', 'items': {'type': 'string'}, 'description': '测试覆盖局限或环境问题，不是用户决策'},
+            'open_questions': {'type': 'array', 'items': {'type': 'string'}, 'description': '旧字段，新调用留空；系统从 decision_questions 生成'},
             'hypotheses': {'type': 'array', 'items': hypothesis},
             'root_cause': {'type': 'string', 'description': '触发条件到症状的完整因果链，引用 文件:行号'},
             'trigger_paths': {'type': 'array', 'items': {'type': 'string'}, 'description': '所有能触发该症状的代码路径'},
             'reproduction': {'type': 'object', 'properties': {'command': {'type': 'string', 'description': '复现命令；无法复现时留空'}, 'test_files': {'type': 'array', 'items': {'type': 'string'}}, 'not_reproducible_reason': {'type': 'string'}}},
             'proposals': {'type': 'array', 'items': proposal}},
-         'required': ['symptom', 'hypotheses', 'root_cause', 'reproduction', 'proposals']}, validate)
+         'required': ['symptom', 'hypotheses', 'root_cause', 'reproduction', 'proposals', 'decision_questions', 'assumptions', 'verification_limits']}, validate)
 
 
 def compose_report_simple(analysis, repro) -> str:
@@ -157,6 +181,9 @@ def compose_report_simple(analysis, repro) -> str:
     lines = [f"症状理解：期望 {s['expected']}；实际 {s['actual']}", '验收标准：' + '；'.join(s['acceptance'])]
     if analysis['open_questions']:
         lines.append('待确认：' + '；'.join(analysis['open_questions']))
+    for key, label in [('assumptions', '采用的兼容假设'), ('verification_limits', '验证局限')]:
+        if analysis.get(key):
+            lines.append(label + '：' + '；'.join(analysis[key]))
     lines.append('根因：' + analysis['root_cause'])
     if analysis['trigger_paths']:
         lines.append('触发路径：' + '；'.join(analysis['trigger_paths']))
@@ -192,8 +219,12 @@ async def run_analysis(llm, reviewer, worktree, prompt, *, bug, visual='', image
     tools = build_tools(workspace, commands=sandbox_available(), images=images, previous=previous, editor=editor, preview=preview) + [_analysis_tool(workspace, worktree, holder)]
 
     # 增强系统提示：强调自我检查和工具验证
-    extra_system = '\n\n重要：提交前请自我检查：\n- 复现测试是否真的失败？\n- 根因定位是否有源码证据支持？\n- 多个假设是否都经过验证？\n- 不确定的地方是否标注在 open_questions 中？'
-    messages = new_session(prompt + extra_system, editor=editor, browser=bool(preview))
+    extra_system = '\n\n重要：提交前请自我检查：\n- 复现测试是否真的失败？\n- 根因定位是否有源码证据支持？\n- 多个假设是否都经过验证？\n- 是否先调查再提问？decision_questions 仅保留用户才能决定的阻塞问题；技术假设写入 assumptions，验证局限写入 verification_limits；每个方案的 impact 必须引用实际改动，不能因出现 API 或字段等词就判为高风险。'
+    messages = load_session(session_path(worktree))
+    if messages:
+        messages.append({'role': 'user', 'content': prompt + extra_system})
+    else:
+        messages = new_session(prompt + extra_system, editor=editor, browser=bool(preview))
 
     try:
         # 直接运行一次，依赖工具验证和自我检查
@@ -261,6 +292,7 @@ def _fix_tool(workspace, worktree, repro, holder):
         result = dict(repro)
         if repro.get('command'):
             code, output = await run_in_worktree(worktree, repro['command'], REPRO_TIMEOUT, deny_read=workspace.deny_read)
+            _check_reproduction_environment(code, output)
             result.update(exit_after=code, output_after=clip_output(output, 3000))
             if code != 0:
                 raise ToolError(f'复现命令在修复后仍然失败（退出码 {code}），问题还没有修好。输出：\n{clip_output(output, 4000)}')

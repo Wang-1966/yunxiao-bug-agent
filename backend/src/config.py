@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Agent 配置
     max_concurrent_agents: int = 3
     agent_timeout: int = 1800  # 30分钟
+    agent_engine: Literal['native', 'pi'] = 'native'
+    pi_node_command: str = 'node'
+    agent_context_window: int = Field(default=128000, ge=8192, description='未知模型上下文窗口的兼容估算，可按模型覆盖')
 
     # 工作目录
     worktrees_dir: str = ".worktrees"

@@ -4,8 +4,12 @@ import json
 import os
 import re
 import signal
+import sys
+import tempfile
 import uuid
 from pathlib import Path
+
+from loguru import logger
 
 from ..config import get_settings
 
@@ -62,7 +66,60 @@ async def prepare_worktree(bug):
     worktree = root / f'repair-{run_id}'
     branch = repair_branch_name(bug, run_id)
     await git(repo, 'worktree', 'add', '-b', branch, str(worktree), base)
+    await prepare_worktree_dependencies(repo, worktree)
     return {'worktree_path': str(worktree), 'repair_branch': branch, 'base_commit': base}
+
+
+async def prepare_worktree_dependencies(repo, worktree):
+    """复用匹配的本地 Node 依赖副本；不共享可写文件、不复制安装凭据。"""
+    repo, worktree = Path(repo).resolve(), Path(worktree).resolve()
+    source, target = repo / 'node_modules', worktree / 'node_modules'
+    if target.exists() or target.is_symlink() or not source.is_dir() or source.is_symlink():
+        return False
+    if not (worktree / 'package.json').is_file():
+        return False
+    # 不把本地依赖带入交付差异，也不复用另一版本/工作区配置下的安装结果。
+    if (await run_process(['git', 'check-ignore', '--quiet', '--', 'node_modules/'], worktree))[0]:
+        return False
+    config_names = {'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml',
+                    'pnpm-workspace.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', '.pnpmfile.cjs'}
+    names = set(config_names)
+    for root in (repo, worktree):
+        names.update(name for name in (await git(root, 'ls-files', '-z')).split('\0')
+                     if Path(name).name in config_names)
+    for name in names:
+        left, right = repo / name, worktree / name
+        if left.is_symlink() or right.is_symlink():
+            return False
+        if left.is_file() != right.is_file() or (left.is_file() and left.read_bytes() != right.read_bytes()):
+            logger.info('依赖配置不同，工作树需独立安装依赖：{}', name)
+            return False
+
+    def links_are_internal():
+        for directory, dirs, files in os.walk(source):
+            for name in dirs + files:
+                link = Path(directory) / name
+                if link.is_symlink() and (os.path.isabs(os.readlink(link)) or not link.resolve().is_relative_to(source)):
+                    return False
+        return True
+
+    if not await asyncio.to_thread(links_are_internal):
+        logger.info('源依赖包含外部链接，工作树需独立安装依赖：{}', worktree)
+        return False
+    # 临时目录完成后再发布，取消或失败不会留下半份 node_modules。
+    with tempfile.TemporaryDirectory(prefix='.repair-deps-', dir=worktree) as staging:
+        snapshot = Path(staging) / 'node_modules'
+        # APFS 写时复制；其他平台普通复制，后续写入都彼此隔离。
+        flag = '-cRP' if sys.platform == 'darwin' else '-RP'
+        code, output = await run_process(['cp', flag, str(source), str(snapshot)], worktree, timeout=300)
+        if code:
+            logger.warning('无法准备本地依赖副本，工作树需独立安装依赖：{}；{}', worktree, output[-1000:])
+            return False
+        if target.exists() or target.is_symlink():
+            return False
+        snapshot.rename(target)
+    logger.info('已为修复工作树准备独立依赖副本：{}', worktree)
+    return True
 
 
 def parse_json_objects(response):

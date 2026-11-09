@@ -16,7 +16,8 @@ const { Header, Sider, Content } = Layout;
 const AppLayout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const activePath = location.pathname.startsWith('/bugs/') ? '/bugs' : location.pathname;
+  const isWorkspace = location.pathname.startsWith('/agents/');
+  const activePath = isWorkspace ? '/agents' : location.pathname.startsWith('/bugs/') ? '/bugs' : location.pathname;
   const { themeMode, setThemeMode } = useThemeStore();
   const currentTheme = UI_THEMES[themeMode];
 
@@ -54,7 +55,7 @@ const AppLayout: React.FC = () => {
   ];
 
   return (
-    <Layout className={`app-shell theme-${themeMode}`}>
+    <Layout className={`app-shell theme-${themeMode}${isWorkspace ? ' workspace-shell' : ''}`}>
       <a className="skip-link" href="#main-content">
         跳转到主要内容
       </a>
@@ -93,7 +94,7 @@ const AppLayout: React.FC = () => {
             <span>工作空间</span>
             <span>/</span>
             <strong>
-              {location.pathname.startsWith('/bugs/')
+              {isWorkspace ? '修复工作台' : location.pathname.startsWith('/bugs/')
                 ? 'Bug 详情与补充'
                 : menuItems.find((item) => item.key === activePath)?.label}
             </strong>
@@ -117,7 +118,7 @@ const AppLayout: React.FC = () => {
           </div>
         </Header>
 
-        <Content className="app-content" id="main-content" tabIndex={-1}>
+        <Content className={`app-content${isWorkspace ? ' workspace-content' : ''}`} id="main-content" tabIndex={-1}>
           <div className="app-content-inner">
             <Outlet />
           </div>

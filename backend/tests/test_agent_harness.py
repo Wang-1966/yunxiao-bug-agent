@@ -2,6 +2,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -9,6 +10,27 @@ from fake_agent import REVIEW_OK, ScriptedLLM, analysis_args, review_refuted, tu
 from src.core.agent_tools import ToolError, Workspace, run_in_worktree, sandbox_available
 from src.core.repair_agent import run_analysis, run_fix
 from src.core.tool_agent import run_tool_agent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['analysis', 'fix'])
+async def test_missing_dependency_is_not_business_reproduction(repository, monkeypatch, phase):
+    from src.core import repair_agent
+    (repository / 'test_repro.py').write_text('assert False')
+    output = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@fangtian/components'"
+    monkeypatch.setattr(repair_agent, 'run_in_worktree', AsyncMock(return_value=(1, output)))
+    holder = {}
+    workspace = Workspace(repository, mode='analyze' if phase == 'analysis' else 'fix')
+    if phase == 'analysis':
+        tool = repair_agent._analysis_tool(workspace, repository, holder)
+        args = analysis_args(reproduction={'command': 'node test.mjs', 'test_files': ['test_repro.py']})[1]
+    else:
+        (repository / 'app.py').write_text('value = 2')
+        tool = repair_agent._fix_tool(workspace, repository, {'command': 'node test.mjs'}, holder)
+        args = {'summary': '修复'}
+    with pytest.raises(ToolError, match='依赖加载失败'):
+        await tool.handler(args)
+    assert not holder
 
 
 @pytest.fixture
@@ -189,7 +211,7 @@ async def test_gpt_models_apply_a_unified_diff(repository):
 
 
 @pytest.mark.asyncio
-async def test_compaction_summarizes_and_rereads_recent_files(repository):
+async def test_compaction_summarizes_without_injecting_unrelated_file_headers(repository):
     from src.core.tool_agent import COMPACT_TRIGGER_CHARS, compact_history
     files = Workspace(repository, mode='fix')
     files.read_file('app.py')
@@ -206,7 +228,8 @@ async def test_compaction_summarizes_and_rereads_recent_files(repository):
     removed, _, _ = await compact_history(messages, Summarizer(), files)
     assert removed >= 1
     note = messages[-1]['content']
-    assert '摘要：app.py:2' in note and 'value = 1' in note
+    assert '摘要：app.py:2' in note
+    assert 'value = 1' not in note  # 不再补入无关的文件前 120 行。
     assert messages[2]['content'].startswith('[较早的工具结果已压缩')
 
 

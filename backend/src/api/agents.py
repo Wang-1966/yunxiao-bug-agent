@@ -13,10 +13,11 @@ from ..models.agent import (
     AgentControlRequest,
     RepairConfirmation,
     ProposalConfirmation,
+    ConversationMessageRequest,
 )
 from ..config import get_settings
 from ..core.orchestrator import get_orchestrator
-from ..core.agent_stream import live_stream
+from ..core.agent_stream import live_stream, tool_activity
 from ..core.projects import resolve_project_config, project_configuration_lock
 from ..core.preview_manager import start_preview, stop_preview, preview_status
 from ..core.tool_agent import repair_unicode_escapes
@@ -28,6 +29,68 @@ settings = get_settings()
 def get_db_path() -> str:
     """获取数据库路径"""
     return settings.database_url.replace("sqlite+aiosqlite:///", "")
+
+
+@router.get('/{agent_id}/conversation')
+async def get_conversation(agent_id: str):
+    from ..core import conversation, agent_discussion
+    from ..core.runtime_config import engine
+    try:
+        items = await conversation.messages(agent_id, load_images=False)
+        for item in items:
+            item['images'] = [f"/api/agents/{agent_id}/conversation/{item['id']}/images/{index}" for index in range(len(item['images']))]
+        async with aiosqlite.connect(get_db_path()) as db:
+            row = await (await db.execute('SELECT a.status, b.assigned_agent_id FROM agents a JOIN bugs b ON a.current_bug_id=b.bug_id WHERE a.agent_id=?', (agent_id,))).fetchone()
+        return {'messages': items, 'discussing': agent_discussion.busy(agent_id), 'engine': engine(),
+                'status': row[0] if row else 'idle', 'can_send': bool(row and row[1] == agent_id)}
+    except KeyError:
+        raise HTTPException(404, 'Agent 不存在')
+
+
+@router.get('/{agent_id}/conversation/{message_id}/images/{index}')
+async def conversation_image(agent_id: str, message_id: int, index: int):
+    import base64
+    from fastapi.responses import Response
+    from ..core.conversation import image_data
+    try:
+        url = await image_data(agent_id, message_id, index)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    header, payload = url.split(',', 1)
+    return Response(base64.b64decode(payload), media_type=header[5:].split(';')[0], headers={'Cache-Control': 'private, max-age=3600'})
+
+
+@router.post('/{agent_id}/conversation')
+async def send_conversation(agent_id: str, request: ConversationMessageRequest):
+    from ..core import conversation, agent_discussion
+    from ..core.repair_review import _delivery_lock
+    runner = get_orchestrator()
+    # 与停止/删除/审批互斥，消息不会在交付事务中偷偷启动另一个执行器。
+    async with runner._agent_control_lock, _delivery_lock, conversation.lock_for(agent_id):
+        try:
+            async with aiosqlite.connect(get_db_path()) as db:
+                row = await (await db.execute('SELECT status FROM agents WHERE agent_id=?', (agent_id,))).fetchone()
+                if not row:
+                    raise KeyError(agent_id)
+            message_id = await conversation.add_user(agent_id, request)
+            pending = await conversation.pending(agent_id)
+            current_pending = any(item['id'] == message_id for item in pending)
+            result = await agent_discussion.dispatch_pending(agent_id, runner, status=row[0], pending=pending)
+            if result:
+                return {'id': message_id, 'status': 'delivered', 'retry': result}
+            return {'id': message_id, 'status': 'queued' if current_pending else 'delivered'}
+        except KeyError:
+            raise HTTPException(404, 'Agent 不存在')
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+
+
+def require_discussion_idle(agent_id):
+    from ..core.agent_discussion import busy
+    if busy(agent_id):
+        raise HTTPException(409, 'Agent 正在回复，请等待或停止回复后再操作')
 
 
 @router.get("", response_model=List[AgentStatus])
@@ -170,7 +233,7 @@ async def agent_transcript(agent_id: str, after: int = 0, limit: int = 500):
         'id': row['id'], 'level': row['log_level'], 'message': row['message'],
         'metadata': json.loads(row['metadata']) if row['metadata'] else None, 'created_at': row['created_at'],
     } for row in rows]
-    return {'entries': entries, 'live': live_stream(agent_id)}
+    return {'entries': entries, 'live': live_stream(agent_id), 'activity': tool_activity(agent_id)}
 
 
 @router.post("/submit-task", response_model=TaskSubmitResponse)
@@ -255,6 +318,7 @@ async def stop_agent(agent_id: str):
 
 @router.post('/{agent_id}/retry')
 async def retry_agent(agent_id: str):
+    require_discussion_idle(agent_id)
     """从失败阶段继续执行；原任务无法续跑时新建任务。"""
     try:
         return await get_orchestrator().retry_agent(agent_id)
@@ -283,7 +347,9 @@ async def _restart_rejected_repair(bug_id):
 async def confirm_agent_repair(agent_id: str, request: RepairConfirmation):
     from ..core.repair_review import confirm_repair
     try:
-        result = await confirm_repair(get_db_path(), agent_id, request)
+        async with get_orchestrator()._agent_control_lock:
+            require_discussion_idle(agent_id)
+            result = await confirm_repair(get_db_path(), agent_id, request)
         runtime = get_orchestrator().get_agent_status(agent_id)
         if runtime:
             runtime.update(status='completed' if request.confirmed else 'rejected', progress=100 if request.confirmed else 90)
@@ -339,7 +405,9 @@ async def get_agent_proposal(agent_id: str):
 @router.post('/{agent_id}/proposal-confirmation')
 async def confirm_agent_proposal(agent_id: str, request: ProposalConfirmation):
     try:
-        return await get_orchestrator().confirm_proposal(agent_id, request.proposal_index, request.feedback, request.decision_id, request.images, request.document)
+        async with get_orchestrator()._agent_control_lock:
+            require_discussion_idle(agent_id)
+            return await get_orchestrator().confirm_proposal(agent_id, request.proposal_index, request.feedback, request.decision_id, request.images, request.document)
     except KeyError:
         raise HTTPException(status_code=404, detail='Agent 不存在')
     except ValueError as exc:

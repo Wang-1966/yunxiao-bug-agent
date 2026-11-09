@@ -1,5 +1,5 @@
 import api from './api';
-import type { AgentLiveStream, AgentTranscriptEntry, RichInputNode } from '../types';
+import type { AgentLiveStream, AgentToolActivity, AgentTranscriptEntry, RichInputNode, RichInputValue, ConversationMessage } from '../types';
 import { assignAgentLooks } from '../utils/agentLooks';
 
 export interface PreviewStatus {
@@ -65,24 +65,24 @@ export const agentService = {
 
   async transcript(agentId: string, after = 0) {
     const response = await api.get(`/api/agents/${encodeURIComponent(agentId)}/transcript`, { params: { after } });
-    return response.data as { entries: AgentTranscriptEntry[]; live: AgentLiveStream | null };
+    return response.data as { entries: AgentTranscriptEntry[]; live: AgentLiveStream | null; activity?: AgentToolActivity | null };
+  },
+
+  async conversation(agentId: string) {
+    return (await api.get(`/api/agents/${encodeURIComponent(agentId)}/conversation`)).data as {
+      messages: ConversationMessage[]; discussing: boolean; engine: 'native' | 'pi'; status: string; can_send: boolean;
+    };
+  },
+
+  async sendMessage(agentId: string, value: RichInputValue, clientId: string) {
+    return (await api.post(`/api/agents/${encodeURIComponent(agentId)}/conversation`, {
+      text: value.text, images: value.images, document: value.document, client_id: clientId,
+    })).data as { id: number; status: string; retry?: { agent_id: string } };
   },
 
   async retry(agentId: string) {
     const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/retry`);
     return response.data as { agent_id: string; task_id: string; mode: 'resume' | 'restart'; start_node?: string; stage_label?: string; reason: string };
-  },
-
-  // 暂停 Agent
-  async pause(agentId: string) {
-    const response = await api.post(`/api/agents/${agentId}/pause`);
-    return response.data;
-  },
-
-  // 恢复 Agent
-  async resume(agentId: string) {
-    const response = await api.post(`/api/agents/${agentId}/resume`);
-    return response.data;
   },
 
   // 停止 Agent

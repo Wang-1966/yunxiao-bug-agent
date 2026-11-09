@@ -34,6 +34,22 @@ def _provider(**overrides):
     return provider
 
 
+def test_context_capabilities_roundtrip_and_old_client_preservation(tmp_path, monkeypatch):
+    client, path = _client(tmp_path, monkeypatch, {
+        'providers': [_provider(context_windows={'model-a': 64000}, stream_usage=True)],
+        'default_provider': 'relay', 'default_model': 'model-a',
+    })
+    response = client.put('/api/llm-config', json={'providers': [_provider(api_key='')]})
+    assert response.status_code == 200
+    assert response.json()['providers'][0]['context_windows'] == {'model-a': 64000}
+    assert response.json()['providers'][0]['stream_usage'] is True
+    invalid = client.put('/api/llm-config', json={'providers': [_provider(context_windows={'model-a': -1})]})
+    assert invalid.status_code == 422
+    cleared = client.put('/api/llm-config', json={'providers': [_provider(context_windows={}, stream_usage=False)]})
+    assert cleared.status_code == 200
+    assert json.loads(path.read_text())['providers'][0]['context_windows'] == {}
+
+
 def test_provider_can_be_added_and_key_stays_on_server(tmp_path, monkeypatch):
     client, path = _client(tmp_path, monkeypatch, {
         'providers': [_provider()],

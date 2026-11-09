@@ -7,8 +7,7 @@ import axios from 'axios';
 import DOMPurify from 'dompurify';
 import { bugService } from '../../services/bugService';
 import type { Bug } from '../../types';
-import { getStatusLabel, sourceStatusClass } from '../../utils/statusLabels';
-import { QuestPipeline } from '../Shared/QuestPipeline';
+import { sourceStatusClass } from '../../utils/statusLabels';
 import BugSupplementEditor from './BugSupplementEditor';
 
 function prepareDescription(bug: Bug) {
@@ -135,7 +134,6 @@ export default function BugDetail({
           <>
             <section className="bug-summary">
               <h2>{bug.title}</h2>
-              <QuestPipeline status={bug.status} stage={bug.status} compact />
               <Descriptions
                 column={{ xs: 1, sm: 2, lg: 3 }}
                 items={[
@@ -160,16 +158,6 @@ export default function BugDetail({
                       </Tag>
                     ),
                   },
-                  { key: 'status', label: '修复状态', children: getStatusLabel(bug.status) },
-                  {
-                    key: 'source',
-                    label: '来源',
-                    children: bug.source === 'yunxiao' ? '云效' : bug.source,
-                  },
-                  { key: 'repo', label: '仓库路径', children: bug.repo_path || '-' },
-                  { key: 'branch', label: '分支', children: bug.branch || '-' },
-                  { key: 'test', label: '验证命令', children: bug.test_command || '未配置' },
-                  { key: 'agent', label: '分配 Agent', children: bug.assigned_agent_id || '-' },
                 ]}
               />
             </section>

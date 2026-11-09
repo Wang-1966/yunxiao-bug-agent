@@ -21,6 +21,7 @@ import RichInput from '../Shared/RichInput';
 import { AgentAvatar, resolveAgentPersona } from '../Shared/AgentAvatar';
 import { QuestPipeline } from '../Shared/QuestPipeline';
 import RepairPreview from './RepairPreview';
+import AnalysisDecisions from './AnalysisDecisions';
 
 interface Props {
   agentId: string | null;
@@ -106,7 +107,7 @@ function AnalysisReportView({
         </div>
         <div className={questions.length ? 'is-open' : ''}>
           <dt>待确认</dt>
-          <dd>{questions.length ? questions.join('；') : '无'}</dd>
+          <dd>{questions.length || analysis?.assumptions?.length || analysis?.verification_limits?.length ? <AnalysisDecisions analysis={analysis} /> : '无'}</dd>
         </div>
       </dl>
       <Collapse size="small" items={[{ key: 'detail', label: '排查细节', children: details }]} />
@@ -294,7 +295,7 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
 
   return (
     <Modal
-      title="修复结果与人工验收"
+      title={agent?.status === 'awaiting_plan_confirmation' ? '选择修复方案' : '修复结果与人工验收'}
       open={!!agentId}
       onCancel={saving || reading ? undefined : onClose}
       width={980}

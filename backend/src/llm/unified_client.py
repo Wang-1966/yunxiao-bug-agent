@@ -131,6 +131,8 @@ class UnifiedLLMClient:
         delta_fields = set()
         if temperature is not None:
             kwargs['temperature'] = temperature
+        if getattr(self.provider, 'stream_usage', False):
+            kwargs.setdefault('stream_options', {'include_usage': True})
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,
@@ -141,6 +143,14 @@ class UnifiedLLMClient:
         try:
             async for chunk in response:
                 diagnostics['stream_chunks'] += 1
+                usage = getattr(chunk, 'usage', None)
+                if usage:
+                    diagnostics['usage'] = {
+                        'input_tokens': usage.prompt_tokens,
+                        'output_tokens': usage.completion_tokens,
+                        'total_tokens': usage.total_tokens,
+                        'cached_tokens': getattr(getattr(usage, 'prompt_tokens_details', None), 'cached_tokens', None),
+                    }
                 if getattr(chunk, 'id', None):
                     diagnostics['response_id'] = chunk.id
                 if getattr(chunk, 'model', None):

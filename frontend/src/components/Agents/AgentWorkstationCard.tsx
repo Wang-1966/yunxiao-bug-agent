@@ -1,8 +1,7 @@
-import React, { useState } from 'react';
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button, Dropdown, Progress, Space, Tag, Tooltip } from 'antd';
 import {
-  PauseCircleOutlined,
-  PlayCircleOutlined,
   StopOutlined,
   ReloadOutlined,
   DeleteOutlined,
@@ -11,14 +10,12 @@ import {
   FileTextOutlined,
   CodeOutlined,
   EyeOutlined,
-  UpOutlined,
 } from '@ant-design/icons';
 import type { AgentStatus, Bug } from '../../types';
 import { getStatusLabel } from '../../utils/statusLabels';
 import { AgentAvatar, resolveAgentPersona } from '../Shared/AgentAvatar';
 import { QuestPipeline } from '../Shared/QuestPipeline';
 import BugLink from '../Bugs/BugLink';
-import AgentTranscript from './AgentTranscript';
 import { StageTimings } from './StageTimings';
 
 export interface AgentWorkstationCardProps {
@@ -30,8 +27,6 @@ export interface AgentWorkstationCardProps {
   onOpenBug?: (bugId: string) => void;
   onReview?: (agentId: string) => void;
   onRetry?: (agent: AgentStatus, fromScratch?: boolean) => void;
-  onPause?: (agentId: string) => void;
-  onResume?: (agentId: string) => void;
   onStop?: (agentId: string) => void;
   onDelete?: (agent: AgentStatus) => void;
 }
@@ -68,14 +63,10 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
   onOpenBug,
   onReview,
   onRetry,
-  onPause,
-  onResume,
   onStop,
   onDelete,
 }) => {
-  const [showTranscript, setShowTranscript] = useState(
-    !compact && (agent.status === 'busy' || agent.status === 'error'),
-  );
+  const navigate = useNavigate();
   const persona = resolveAgentPersona(agent.name);
   const bug = agent.current_bug;
   const isWaitingAction =
@@ -220,10 +211,10 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
             <Button
               size="small"
               type="text"
-              icon={showTranscript ? <UpOutlined /> : <CodeOutlined />}
-              onClick={() => setShowTranscript((prev) => !prev)}
+              icon={<CodeOutlined />}
+              onClick={() => navigate(`/agents/${encodeURIComponent(agent.agent_id)}`)}
             >
-              {showTranscript ? '收起脑暴与执行流' : '展开实时脑暴与执行流'}
+              打开会话
             </Button>
           </div>
 
@@ -268,39 +259,15 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
               </Space.Compact>
             )}
 
-            {agent.status === 'busy' && (
-              <>
-                {onPause && (
-                  <Button
-                    size="small"
-                    icon={<PauseCircleOutlined />}
-                    onClick={() => onPause(agent.agent_id)}
-                  >
-                    暂停
-                  </Button>
-                )}
-                {onStop && (
-                  <Button
-                    size="small"
-                    danger
-                    icon={<StopOutlined />}
-                    loading={stopping}
-                    onClick={() => onStop(agent.agent_id)}
-                  >
-                    停止
-                  </Button>
-                )}
-              </>
-            )}
-
-            {agent.status === 'paused' && onResume && (
+            {['busy', 'paused'].includes(agent.status) && onStop && (
               <Button
                 size="small"
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={() => onResume(agent.agent_id)}
+                danger
+                icon={<StopOutlined />}
+                loading={stopping}
+                onClick={() => onStop(agent.agent_id)}
               >
-                恢复
+                停止
               </Button>
             )}
 
@@ -320,20 +287,6 @@ export const AgentWorkstationCard: React.FC<AgentWorkstationCardProps> = ({
         </div>
       )}
 
-      {/* 展开的实时思考与日志流 */}
-      {!compact && showTranscript && (
-        <div className="workstation-transcript-drawer">
-          {agent.worktree_path && (
-            <div className="workstation-worktree-bar">
-              <span>📂 工作树：{agent.worktree_path}</span>
-              {agent.modified_files?.length ? (
-                <span>📝 修改文件：{agent.modified_files.join('、')}</span>
-              ) : null}
-            </div>
-          )}
-          <AgentTranscript agentId={agent.agent_id} active={agent.status === 'busy'} />
-        </div>
-      )}
     </article>
   );
 };

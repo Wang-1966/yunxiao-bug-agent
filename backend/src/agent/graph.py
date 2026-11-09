@@ -57,7 +57,7 @@ def create_bug_fix_graph(start_node: str = "fetch_bug") -> StateGraph:
         # 调度器传入 require_plan_confirmation 时暂停；底层图的历史直接调用保持兼容。
         workflow.add_conditional_edges(
             'design_proposal',
-            lambda state: END if state.get('error') or state.get('require_plan_confirmation') else 'implement_fix',
+            lambda state: END if state.get('error') or (state.get('require_plan_confirmation') and state.get('waiting_for_user')) else 'implement_fix',
             {END: END, 'implement_fix': 'implement_fix'},
         )
 

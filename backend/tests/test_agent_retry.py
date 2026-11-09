@@ -1,3 +1,4 @@
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -9,6 +10,8 @@ from fastapi import HTTPException
 
 from src.api import agents
 from src.core import orchestrator
+from src.core import conversation
+from src.models.agent import ConversationMessageRequest
 from src.core.repair_executor import prepare_worktree
 from fake_agent import adapt_operate
 
@@ -56,6 +59,64 @@ async def run_queued(runner):
     return task
 
 
+@pytest.mark.asyncio
+async def test_chat_continue_resumes_failed_worktree_once(task_db, worktree, monkeypatch):
+    runner = orchestrator.MultiAgentOrchestrator()
+    runner._running = True
+    monkeypatch.setattr(agents, 'get_orchestrator', lambda: runner)
+    state = {**worktree, 'root_cause': '已有根因', 'selected_proposal': {'name': '原方案'}}
+    agent_id = await fail_task(runner, state, '测试依赖缺失', 'implement_fix')
+    source = Path(worktree['worktree_path']) / 'app.py'
+    source.write_text('value = 2\n')
+    request = ConversationMessageRequest(text='继续', client_id='continue-once')
+    with patch('src.core.agent_discussion.start') as discuss:
+        first, second = await asyncio.gather(agents.send_conversation(agent_id, request), agents.send_conversation(agent_id, request))
+        assert first['id'] == second['id']
+        assert first['retry']['agent_id'] == agent_id
+        assert first['retry']['start_node'] == 'implement_fix'
+        assert runner.task_queue.qsize() == 1
+        assert not discuss.called
+    assert source.read_text() == 'value = 2\n'
+    assert runner.agent_states[agent_id]['task'].resume_state['worktree_path'] == worktree['worktree_path']
+    assert not await conversation.pending(agent_id)
+    async with aiosqlite.connect(task_db) as db:
+        assert await (await db.execute('SELECT status FROM agents WHERE agent_id=?', (agent_id,))).fetchone() == ('busy',)
+        # 即使下一轮又失败，重放同一个客户端请求也不能再次启动。
+        await db.execute("UPDATE agents SET status='error' WHERE agent_id=?", (agent_id,))
+        await db.execute("UPDATE bugs SET status='failed' WHERE bug_id='one'")
+        await db.commit()
+    replay = await agents.send_conversation(agent_id, request)
+    assert 'retry' not in replay and runner.task_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_continue_navigates_to_restart_when_original_cannot_resume(task_db, worktree, monkeypatch):
+    runner = orchestrator.MultiAgentOrchestrator()
+    runner._running = True
+    monkeypatch.setattr(agents, 'get_orchestrator', lambda: runner)
+    agent_id = await fail_task(runner, worktree, '失败', 'implement_fix')
+    with patch.object(runner, '_resume_point', AsyncMock(return_value=(None, '原工作树已生成提交'))):
+        result = await agents.send_conversation(agent_id, ConversationMessageRequest(text='请继续修复！', client_id='restart'))
+    assert result['retry']['mode'] == 'restart'
+    assert result['retry']['agent_id'] != agent_id
+    assert runner.task_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_continue_after_failure_uses_same_resume_flow(task_db, worktree):
+    from src.core import agent_discussion
+    runner = orchestrator.MultiAgentOrchestrator()
+    runner._running = True
+    agent_id = await fail_task(runner, {**worktree, 'selected_proposal': {'name': '原方案'}}, '失败', 'implement_fix')
+    await conversation.add_user(agent_id, ConversationMessageRequest(text='继续修复', client_id='pending-resume'))
+    with patch('src.core.agent_discussion.start') as discuss:
+        await agent_discussion.resume_pending(agent_id, runner)
+    assert runner.task_queue.qsize() == 1
+    assert runner.agent_states[agent_id]['task'].start_node == 'implement_fix'
+    assert not await conversation.pending(agent_id)
+    assert not discuss.called
+
+
 def patched_workflow(client, operate):
     return (
         patch('src.api.bugs.get_bug_details', AsyncMock(return_value={'title': 'Bug', 'description': '描述'})),
@@ -95,15 +156,19 @@ async def test_fix_failure_resumes_implementation_in_same_worktree(task_db, work
 
     async def operate(llm, path, prompt, writable=False, **kwargs):
         assert writable and path == worktree['worktree_path']
+        async with aiosqlite.connect(task_db) as db:
+            stage = await (await db.execute('SELECT stage FROM task_history WHERE agent_id=?', (agent_id,))).fetchone()
+        assert stage == ('fixing',)  # 工具执行期间不应仍展示“排队中”。
         prompts.append(prompt)
         source.write_text('value = 2\n')
         return {'summary': '修正'}
 
     p1, p2, p3, p4 = patched_workflow(AsyncMock(), operate)
-    with p1, p2, p3, p4:
+    with p1, p2, p3, p4, patch('src.core.orchestrator.prepare_worktree_dependencies', AsyncMock()) as dependencies:
         result = await runner.retry_agent(agent_id)
         assert result['start_node'] == 'implement_fix'
         await run_queued(runner)
+    dependencies.assert_awaited_once_with('/repo', worktree['worktree_path'])
     runtime = runner.get_agent_status(agent_id)
     assert runtime['status'] == 'awaiting_confirmation', runtime.get('error')
     assert '"B"' in prompts[0] and '执行器没有产生实际代码修改' in prompts[0]

@@ -1,5 +1,5 @@
 """LLM 配置数据模型"""
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal, Optional
 
 ResponseStyle = Literal['detailed', 'concise', 'minimal']
@@ -15,6 +15,15 @@ class LLMProvider(BaseModel):
     available_models: list[str] = Field(..., description="可用模型列表")
     default_model: str = Field(..., description="默认模型")
     enabled: bool = Field(default=True, description="是否启用")
+    context_windows: dict[str, int] = Field(default_factory=dict, description="模型上下文窗口 tokens；未填写使用兼容估算")
+    stream_usage: bool = Field(default=False, description='提供商支持在流式响应返回 usage 时启用')
+
+    @field_validator('context_windows')
+    @classmethod
+    def validate_context_windows(cls, value):
+        if any(not name.strip() or window < 8192 or window > 10_000_000 for name, window in value.items()):
+            raise ValueError('模型上下文窗口必须在 8192–10000000 tokens 之间')
+        return value
 
 
 class StageConfig(BaseModel):

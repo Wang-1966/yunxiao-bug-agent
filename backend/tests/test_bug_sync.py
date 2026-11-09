@@ -89,6 +89,29 @@ async def test_failure_does_not_report_success():
 
 
 @pytest.mark.asyncio
+async def test_missing_tracked_bug_refresh_failure_does_not_write_partial_sync(tmp_path):
+    path = tmp_path / 'db.sqlite'
+    async with aiosqlite.connect(path) as db:
+        await db.executescript(open('src/db/init.sql').read())
+        await db.execute("INSERT INTO bugs (bug_id,title,priority,source,source_status) VALUES ('transferred','Bug','normal','yunxiao','待确认')")
+        await db.commit()
+    settings = Settings(_env_file=None, database_url=f'sqlite+aiosqlite:///{path}')
+
+    async def search(self):
+        return [{'id': 'new', 'subject': 'New Bug'}]
+
+    async def detail(self, bug_id):
+        assert bug_id == 'transferred'
+        raise YunxiaoError('当前账号无权访问')
+
+    with patch.object(YunxiaoClient, 'list_my_bugs', search), patch.object(YunxiaoClient, 'get_bug', detail):
+        with pytest.raises(YunxiaoError, match='transferred.*无权访问'):
+            await sync_my_bugs(settings)
+    async with aiosqlite.connect(path) as db:
+        assert await (await db.execute('SELECT bug_id,source_status FROM bugs')).fetchall() == [('transferred', '待确认')]
+
+
+@pytest.mark.asyncio
 async def test_concurrent_sync_does_not_overlap(tmp_path):
     path = tmp_path / "db.sqlite"
     async with aiosqlite.connect(path) as db:

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import AgentRuntimeSettings from './AgentRuntimeSettings';
 import {
   Card,
   Radio,
@@ -146,6 +147,7 @@ export const ConfirmationSettings: React.FC = () => {
         </p>
       </div>
 
+      <AgentRuntimeSettings />
       {/* 确认模式选择 */}
       <Card style={{ marginBottom: 24 }}>
         <h3 style={{ marginBottom: 16 }}>确认模式</h3>
@@ -194,7 +196,7 @@ export const ConfirmationSettings: React.FC = () => {
         <Card style={{ marginBottom: 24 }}>
           <h3 style={{ marginBottom: 16 }}>智能确认规则</h3>
           <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 16 }}>
-            当满足以下任一条件时，将要求用户确认方案
+            新分析只将关键用户决策与实际改动风险作为确认依据；兼容假设和验证局限不会单独暂停。旧报告仍沿用关键词及方案数量规则。
           </p>
 
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -223,7 +225,7 @@ export const ConfirmationSettings: React.FC = () => {
                   })
                 }
               />
-              <span style={{ marginLeft: 12 }}>多个方案时需要确认（超过</span>
+              <span style={{ marginLeft: 12 }}>旧报告：多个方案时需要确认（超过</span>
               <InputNumber
                 min={1}
                 max={10}
@@ -309,7 +311,7 @@ export const ConfirmationSettings: React.FC = () => {
                   })
                 }
               />
-              <span style={{ marginLeft: 12 }}>有待确认问题时需要确认</span>
+              <span style={{ marginLeft: 12 }}>存在必须由用户决定的问题时需要确认</span>
             </div>
 
             {/* 数据结构规则 */}
@@ -338,7 +340,7 @@ export const ConfirmationSettings: React.FC = () => {
                     <CheckCircleOutlined style={{ color: '#52c41a' }} /> 自动批准模式
                   </h4>
                   <p style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 8 }}>
-                    匹配这些模式的 bug 标题将自动执行（正则表达式，每行一个）
+                    仅旧报告：匹配这些标题模式可自动执行；新报告仍检查实际风险（正则表达式，每行一个）
                   </p>
                   <TextArea
                     rows={3}

@@ -877,7 +877,7 @@ a { color: var(--primary); }
   font-size: 13px;
   line-height: 1.65;
 }
-.agent-transcript button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.agent-transcript button:not(.ant-btn) { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .agent-transcript button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
 .agent-transcript .anticon-right { font-size: 10px; transition: transform .15s; }
 .agent-transcript .anticon-right.is-open { transform: rotate(90deg); }
@@ -1006,8 +1006,10 @@ a { color: var(--primary); }
 }
 .bug-row-actions { display: grid; grid-template-columns: 112px 72px; align-items: center; gap: 8px; }
 .bug-row-actions > .ant-btn { justify-self: start; }
-.agent-row-actions { display: grid; grid-template-columns: 112px 144px 66px; align-items: center; gap: 8px; }
+.agent-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.agent-row-actions > div:first-child { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .agent-task-controls { display: flex; align-items: center; gap: 8px; }
+.agent-task-controls:empty { display: none; }
 .bug-summary {
   background: var(--surface);
   border: var(--card-border-width) solid var(--border);
@@ -1400,3 +1402,138 @@ a { color: var(--primary); }
 @keyframes mascot-blink { 0%, 94%, 100% { transform: scaleY(1); } 97% { transform: scaleY(0.15); } }
 @keyframes mascot-bulb { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 @keyframes mascot-type { from { transform: translateY(0); } to { transform: translateY(-2px); } }
+
+/* 修复会话沿用当前主题，输入区独立于可滚动的消息时间线。 */
+.agent-conversation { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface); }
+.agent-conversation .agent-transcript { border: 0; border-radius: 0; min-height: 180px; gap: 12px; }
+.conversation-message { max-width: 94%; padding: 10px 14px; border-radius: 8px; overflow-wrap: anywhere; }
+.conversation-message.is-user { align-self: flex-end; background: var(--surface); border: 1px solid var(--border); min-width: 160px; }
+.conversation-message.is-assistant { align-self: flex-start; padding-left: 0; }
+.conversation-meta { font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.conversation-text { white-space: pre-wrap; }
+.conversation-message .ant-image { margin: 8px 8px 0 0; }
+.conversation-composer { padding: 12px; border-top: 1px solid var(--border); }
+.conversation-run-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 2px 10px; min-height: 22px; color: var(--primary); font-size: 12px; }
+.conversation-run-label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.conversation-run-label > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-run-time { flex-shrink: 0; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.conversation-run-status.is-waiting { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .conversation-run-status .anticon-spin { animation: none; } }
+.conversation-composer .tiptap { min-height: 70px; max-height: 200px; overflow-y: auto; }
+.conversation-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.conversation-actions > span { flex: 1; color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) {
+  .conversation-message { max-width: 100%; }
+  .conversation-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .conversation-actions > span { flex-basis: 100%; }
+}
+
+.conversation-checkpoint { padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.conversation-checkpoint p { color: var(--muted); margin: 6px 0 12px; }
+
+/* 修复工作台：正文、执行细节和输入操作各有独立层级。 */
+.workspace-content.app-content { background: var(--surface); overflow: hidden; display: flex; flex-direction: column; }
+.workspace-content > .app-content-inner { flex: 1; min-height: 0; max-width: none; padding: 0; display: flex; flex-direction: column; }
+.repair-workspace { --conversation-width: 820px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.repair-workspace-header { display: flex; align-items: center; gap: 14px; flex-shrink: 0; padding: 16px 28px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.repair-workspace-back { display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; border-radius: 8px; color: var(--muted); transition: background-color 150ms ease; }
+.repair-workspace-back:hover { color: var(--text-main); background: var(--surface-subtle); }
+.repair-workspace-title { min-width: 0; flex: 1; }
+.repair-workspace-title h1 { margin: 0 0 3px; font-size: 15px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.repair-workspace-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 12px; }
+.repair-muted { color: var(--muted); font-size: 12px; }
+.repair-workspace-status.ant-tag { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; margin: 0; padding: 0 0 0 10px; border: 0; border-left: 1px solid var(--border); border-radius: 0; background: transparent; color: var(--muted); line-height: 16px; }
+.repair-workspace-status > span { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.repair-workspace-status.is-active > span { background: var(--primary); }
+.repair-workspace-body { flex: 1; min-height: 0; display: flex; }
+.repair-chat-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.repair-chat-pane .agent-conversation { flex: 1; min-height: 0; display: flex; flex-direction: column; border: 0; border-radius: 0; background: transparent; }
+.repair-chat-pane .agent-transcript { display: block; flex: 1; min-height: 0; max-height: none; padding: 0 24px; background: transparent; font-size: 15px; line-height: 1.85; scrollbar-gutter: stable both-edges; overscroll-behavior-y: contain; }
+.conversation-timeline { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: var(--conversation-width); margin: 0 auto; padding: 32px 0 28px; }
+.conversation-timeline > * { flex-shrink: 0; min-width: 0; }
+.repair-chat-pane .conversation-message.is-user { max-width: 85%; min-width: 0; padding: 14px 18px; border: 0; border-radius: 16px 16px 4px 16px; background: var(--surface-subtle); }
+.repair-chat-pane .conversation-message.is-assistant { max-width: 100%; width: 100%; padding: 0; }
+.repair-chat-pane .conversation-assistant-message { display: flex; align-items: flex-start; gap: 12px; padding: 8px 0; }
+.repair-chat-pane .conversation-agent-mark { display: grid; place-items: center; width: 26px; height: 26px; flex: 0 0 26px; border-radius: 8px; background: var(--primary-soft); color: var(--primary); font-size: 15px; }
+.repair-chat-pane .conversation-assistant-body { flex: 1; min-width: 0; }
+.repair-chat-pane .conversation-speaker { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; font-size: 12px; font-weight: 600; line-height: 26px; color: var(--text-main); }
+.repair-chat-pane .conversation-speaker > span { font-weight: 400; color: var(--muted); }
+.repair-chat-pane .conversation-meta { margin-bottom: 8px; font-size: 12px; }
+.repair-chat-pane .transcript-note, .repair-chat-pane .transcript-thinking { font-size: 12px; line-height: 1.7; }
+.repair-chat-pane .transcript-note:not(.is-error):not(.is-warning), .repair-chat-pane .transcript-thinking { margin-left: 38px; }
+.agent-transcript summary { display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; padding: 5px 0; list-style: none; cursor: pointer; color: var(--muted); }
+.agent-transcript summary::-webkit-details-marker { display: none; }
+.agent-transcript summary:hover { color: var(--text-main); }
+.agent-transcript summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; border-radius: 3px; }
+.agent-transcript summary .anticon { flex-shrink: 0; }
+.agent-transcript details[open] > summary > .anticon-right { transform: rotate(90deg); }
+.transcript-activity-count { color: var(--muted); font-size: 11px; white-space: nowrap; padding-left: 8px; border-left: 1px solid var(--border); }
+.repair-chat-pane .transcript-tool-group { border: 0; background: transparent; }
+.repair-chat-pane .transcript-tool-group + .transcript-thinking { margin-top: -8px; }
+.repair-chat-pane .transcript-detail, .repair-chat-pane .transcript-thinking-body { margin: 8px 0 4px; padding: 12px 16px; max-height: 300px; overflow: auto; border: 0; border-left: 2px solid var(--border); border-radius: 0 6px 6px 0; background: var(--surface-subtle); font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.repair-chat-pane .transcript-note.is-error, .repair-chat-pane .transcript-note.is-warning { padding: 12px 16px; border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: 8px; background: var(--surface-subtle); color: var(--text-main); }
+.repair-chat-pane .transcript-note.is-error { border-left-color: #DC2626; }
+.repair-chat-pane .transcript-stage { justify-content: flex-start; gap: 12px; margin: 12px 0 0 38px; font-size: 11px; }
+.repair-chat-pane .transcript-stage::before { display: none; }
+.repair-chat-pane .conversation-checkpoint { padding: 20px; margin: 8px 0 0 38px; border-radius: 12px; background: var(--surface-subtle); border: 1px solid var(--border); }
+.repair-chat-pane .conversation-checkpoint > strong { font-size: 15px; }
+.repair-chat-pane .conversation-checkpoint > .ant-btn { margin-top: 8px; }
+.repair-chat-pane .conversation-proposal li + li { margin-top: 6px; }
+.repair-chat-pane .conversation-composer { position: relative; flex-shrink: 0; width: 100%; max-width: calc(var(--conversation-width) + 48px); align-self: center; padding: 10px 24px 16px; border: 0; background: var(--surface); }
+.conversation-input-shell { border: 1px solid var(--border); border-radius: 16px; background: var(--surface); box-shadow: 0 3px 14px color-mix(in srgb, var(--text-main) 4%, transparent); overflow: hidden; transition: border-color 150ms ease, box-shadow 150ms ease; }
+.conversation-input-shell:focus-within { border-color: color-mix(in srgb, var(--primary) 65%, var(--border)); box-shadow: 0 0 0 3px var(--primary-soft); }
+.conversation-input-shell .rich-input-chat { border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+.conversation-input-shell .rich-input-chat .tiptap { box-sizing: border-box; min-height: 60px; max-height: min(180px, 25dvh); padding: 16px 18px 10px; font-size: 15px; }
+.conversation-input-shell .rich-input-chat .tiptap p:last-child { margin-bottom: 0; }
+.rich-input-chat-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 10px 10px; }
+.rich-input-attachment { display: flex; align-items: center; gap: 2px; min-width: 0; color: var(--muted); }
+.rich-input-attachment > .ant-btn { flex-shrink: 0; color: var(--muted); }
+.rich-input-attachment-hint { font-size: 11px; white-space: nowrap; }
+.conversation-input-shell .conversation-actions { justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin: 0; }
+.repair-chat-pane .conversation-actions .ant-btn { box-shadow: none; }
+.repair-chat-pane .conversation-actions .ant-btn-text { color: var(--muted); }
+.repair-chat-pane .conversation-run-status { margin: 0 6px 10px; color: var(--muted); }
+.repair-chat-pane .conversation-run-label > .anticon { color: var(--primary); }
+.conversation-composer-hint { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; padding: 9px 4px 0; font-size: 11px; line-height: 1.6; color: var(--muted); }
+.conversation-composer-hint kbd { font: inherit; }
+.conversation-jump-latest.ant-btn { position: absolute; top: -40px; left: 50%; transform: translateX(-50%); z-index: 2; height: 32px; padding-inline: 13px; border-color: var(--border); border-radius: 20px; color: var(--text-main); background: var(--surface); box-shadow: 0 3px 12px color-mix(in srgb, var(--text-main) 8%, transparent); font-size: 12px; }
+.rich-input-chat-status { padding: 0 18px 8px; color: var(--muted); font-size: 12px; }
+.repair-loading { flex: 1; display: grid; place-items: center; }
+@media (max-width: 767px) {
+  .workspace-shell .brand { display: none; }
+  .workspace-shell .sidebar-inner { padding-top: 8px; }
+  .repair-workspace-header { padding: 12px 16px; gap: 10px; flex-wrap: wrap; }
+  .repair-workspace-title { flex-basis: calc(100% - 44px); }
+  .repair-workspace-title h1 { font-size: 14px; }
+  .repair-chat-pane .agent-transcript { padding-inline: 16px; font-size: 15px; }
+  .conversation-timeline { padding-top: 20px; gap: 14px; }
+  .repair-chat-pane .conversation-composer { padding: 8px 12px max(12px, env(safe-area-inset-bottom)); }
+  .conversation-input-shell .rich-input-chat .tiptap { font-size: 16px; padding-inline: 14px; }
+  .repair-chat-pane .conversation-message.is-user { max-width: 92%; padding: 12px 14px; }
+  .repair-chat-pane .conversation-agent-mark { width: 24px; height: 24px; flex-basis: 24px; font-size: 14px; }
+  .repair-chat-pane .conversation-assistant-message { gap: 8px; }
+  .repair-chat-pane .transcript-note:not(.is-error):not(.is-warning), .repair-chat-pane .transcript-thinking, .repair-chat-pane .transcript-stage { margin-left: 32px; }
+  .repair-chat-pane .conversation-checkpoint { margin-left: 0; padding: 16px; }
+  .rich-input-attachment-hint, .conversation-newline-hint { display: none; }
+  .rich-input-chat-footer { gap: 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .repair-chat-pane .transcript-thinking.is-live .transcript-thinking-toggle span { animation: none; background: none; color: var(--muted); }
+  .repair-chat-pane .anticon-right, .conversation-input-shell, .repair-workspace-back { transition: none; }
+}
+
+.conversation-bug-input { line-height: 1.7; }
+.conversation-bug-input > .conversation-record-link { display: inline-block; height: auto; padding: 0; margin-top: 8px; font-size: 12px; }
+.conversation-bug-description { margin-top: 10px; overflow-wrap: anywhere; }
+.conversation-bug-description p { margin: 6px 0; }
+.conversation-bug-description img, .conversation-bug-description video { display: block; max-width: 100%; max-height: 300px; width: auto; height: auto; object-fit: contain; border-radius: 8px; }
+.conversation-proposal { line-height: 1.8; overflow-wrap: anywhere; }
+.conversation-proposal h3 { font-size: 14px; margin: 16px 0 6px; }
+.conversation-proposal ol, .conversation-proposal ul { padding-left: 22px; }
+.conversation-proposal p { white-space: pre-wrap; color: var(--text-main); }
+
+
+.analysis-decision { margin: 16px 0; }
+.analysis-decision details, .analysis-notes { margin-top: 12px; font-size: 12px; color: var(--muted); }
+.analysis-decision summary, .analysis-notes summary { cursor: pointer; }
+.analysis-decision .ant-btn { height: auto; white-space: normal; text-align: left; padding-block: 6px; }

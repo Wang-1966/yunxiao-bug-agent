@@ -80,6 +80,7 @@ const LLMConfigPage: React.FC = () => {
   const [yunxiaoConfig, setYunxiaoConfig] = useState<YunxiaoConfig | null>(null);
   const [yunxiaoLoading, setYunxiaoLoading] = useState(false);
   const [form] = Form.useForm();
+  const stageConfig = Form.useWatch('stage_config', form);
   const [yunxiaoForm] = Form.useForm();
   const [promptForm] = Form.useForm();
   const [providerForm] = Form.useForm();
@@ -88,6 +89,18 @@ const LLMConfigPage: React.FC = () => {
   const [savingProvider, setSavingProvider] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+
+  const getProviderModelOptions = (providerId: string) => {
+    const provider = config?.providers.find((item) => item.id === providerId);
+    return [...new Set([provider?.default_model, ...(provider?.available_models || [])])]
+      .filter((model): model is string => !!model)
+      .map((value) => ({ value }));
+  };
+
+  const handleProviderChange = (providerId: string, stage: string) => {
+    const model = getProviderModelOptions(providerId)[0]?.value || '';
+    form.setFieldValue(['stage_config', stage, 'model'], model);
+  };
 
   useEffect(() => {
     loadConfig();
@@ -135,10 +148,19 @@ const LLMConfigPage: React.FC = () => {
   };
 
   const handleSave = async (values: any) => {
-    const { providers: _providers, ...rest } = values;
+    const {
+      providers: _providers,
+      default_provider: _defaultProvider,
+      default_model: _defaultModel,
+      use_stage_config: _useStageConfig,
+      ...rest
+    } = values;
+    const payload = Object.prototype.hasOwnProperty.call(values, 'stage_config')
+      ? { ...rest, use_stage_config: true }
+      : rest;
     setLoading(true);
     try {
-      const updated = await llmConfigService.update(rest);
+      const updated = await llmConfigService.update(payload);
       setConfig(updated);
       message.success('配置保存成功');
     } catch (error) {
@@ -154,7 +176,6 @@ const LLMConfigPage: React.FC = () => {
   ) => {
     const updated = await llmConfigService.update({ providers, ...defaults });
     setConfig(updated);
-    if (defaults) form.setFieldsValue(defaults);
     return updated;
   };
 
@@ -197,6 +218,8 @@ const LLMConfigPage: React.FC = () => {
             default_model: provider.default_model,
             available_models: provider.available_models,
             enabled: provider.enabled,
+            context_window_entries: Object.entries(provider.context_windows || {}).map(([model, tokens]) => ({ model, tokens })),
+            stream_usage: provider.stream_usage ?? false,
           }
         : { enabled: true },
     );
@@ -210,8 +233,15 @@ const LLMConfigPage: React.FC = () => {
     default_model: string;
     available_models?: string[];
     enabled?: boolean;
+    context_window_entries?: { model: string; tokens: number }[];
+    stream_usage?: boolean;
   }) => {
     if (!config) return;
+    const windowEntries = values.context_window_entries || [];
+    if (new Set(windowEntries.map(({ model }) => model.trim())).size !== windowEntries.length) {
+      message.error('同一模型只能填写一个上下文窗口');
+      return;
+    }
     const apiKey = values.api_key?.trim() || '';
     if (!editingProvider && !apiKey) {
       message.error('请输入 API Key');
@@ -238,18 +268,21 @@ const LLMConfigPage: React.FC = () => {
       available_models: models,
       default_model: defaultModel,
       enabled: values.enabled ?? true,
+      context_windows: Object.fromEntries((values.context_window_entries || []).map(({ model, tokens }) => [model.trim(), tokens])),
+      stream_usage: values.stream_usage ?? false,
     };
     const providers = editingProvider
       ? config.providers.map((item) => (item.id === editingProvider.id ? provider : item))
       : [...config.providers, provider];
     setSavingProvider(true);
     try {
-      const defaults = config.default_provider
-        ? undefined
-        : {
-            default_provider: provider.id,
-            default_model: provider.default_model,
-          };
+      const defaults =
+        !config.default_provider || config.default_provider === provider.id
+          ? {
+              default_provider: provider.id,
+              default_model: provider.default_model,
+            }
+          : undefined;
       await persistProviders(providers, defaults);
       message.success(editingProvider ? '提供商已更新' : '提供商已添加');
       setEditorOpen(false);
@@ -262,10 +295,6 @@ const LLMConfigPage: React.FC = () => {
 
   const removeProvider = async (provider: LLMProvider) => {
     if (!config) return;
-    if (config.default_provider === provider.id) {
-      message.error('该提供商是默认提供商，请先修改默认配置');
-      return;
-    }
     const usedStage = Object.entries(config.stage_config || {}).find(
       ([, stage]) => stage.provider === provider.id,
     );
@@ -273,9 +302,17 @@ const LLMConfigPage: React.FC = () => {
       message.error(`该提供商仍被 ${usedStage[0]} 阶段使用，请先修改阶段配置`);
       return;
     }
+    const providers = config.providers.filter((item) => item.id !== provider.id);
+    const defaults =
+      config.default_provider === provider.id
+        ? {
+            default_provider: providers[0]?.id || '',
+            default_model: providers[0]?.default_model || '',
+          }
+        : undefined;
     setSavingProvider(true);
     try {
-      await persistProviders(config.providers.filter((item) => item.id !== provider.id));
+      await persistProviders(providers, defaults);
       message.success('提供商已删除');
     } catch (error) {
       message.error(errorDetail(error, '删除提供商失败'));
@@ -417,112 +454,74 @@ const LLMConfigPage: React.FC = () => {
                   onFinish={handleSave}
                   initialValues={config || {}}
                 >
-                  <section className="config-section config-fields">
-                    <h2>默认配置</h2>
-                    <Form.Item
-                      name="default_provider"
-                      label="默认提供商"
-                      rules={[{ required: true }]}
-                    >
-                      <Select placeholder="选择默认提供商">
-                        {config?.providers.map((p) => (
-                          <Option key={p.id} value={p.id}>
-                            {p.name}
-                          </Option>
-                        ))}
-                      </Select>
-                    </Form.Item>
+                  <section className="config-section">
+                    <h2>阶段配置（四棒接力）</h2>
+                    <div className="stage-grid">
+                      {['analyze', 'propose', 'fix', 'verify'].map((stage) => {
+                        const meta = STAGE_META[stage];
+                        return (
+                          <div key={stage} className="stage-fields">
+                            <div className="page-eyebrow" style={{ marginBottom: 6 }}>
+                              {meta.badge}
+                            </div>
+                            <h3>{meta.title}</h3>
+                            <p
+                              style={{
+                                fontSize: 12,
+                                color: 'var(--muted)',
+                                marginBottom: 14,
+                              }}
+                            >
+                              {meta.tip}
+                            </p>
+                            <Form.Item name={['stage_config', stage, 'provider']} label="提供商">
+                              <Select
+                                placeholder="选择提供商"
+                                onChange={(providerId) => handleProviderChange(providerId, stage)}
+                              >
+                                {config?.providers.map((p) => (
+                                  <Option key={p.id} value={p.id}>
+                                    {p.name}
+                                  </Option>
+                                ))}
+                              </Select>
+                            </Form.Item>
 
-                    <Form.Item
-                      name="default_model"
-                      label="默认模型"
-                      rules={[{ required: true }]}
-                    >
-                      <Input placeholder="claude-opus-5" />
-                    </Form.Item>
+                            <Form.Item name={['stage_config', stage, 'model']} label="模型">
+                              <AutoComplete
+                                placeholder="选择或输入模型名称"
+                                options={getProviderModelOptions(stageConfig?.[stage]?.provider)}
+                                filterOption={(input, option) =>
+                                  String(option?.value).toLowerCase().includes(input.toLowerCase())
+                                }
+                              />
+                            </Form.Item>
 
-                    <Form.Item
-                      name="use_stage_config"
-                      valuePropName="checked"
-                      label="启用阶段化配置"
-                    >
-                      <Switch aria-label="启用阶段化配置" />
-                    </Form.Item>
-                  </section>
+                            <Space>
+                              <Form.Item
+                                name={['stage_config', stage, 'temperature']}
+                                label="Temperature"
+                              >
+                                <InputNumber min={0} max={2} step={0.1} style={{ width: 120 }} />
+                              </Form.Item>
 
-                  <Form.Item noStyle shouldUpdate>
-                    {({ getFieldValue }) =>
-                      getFieldValue('use_stage_config') ? (
-                        <section className="config-section">
-                          <h2>阶段配置（四棒接力）</h2>
-                          <div className="stage-grid">
-                            {['analyze', 'propose', 'fix', 'verify'].map((stage) => {
-                              const meta = STAGE_META[stage];
-                              return (
-                                <div key={stage} className="stage-fields">
-                                  <div className="page-eyebrow" style={{ marginBottom: 6 }}>
-                                    {meta.badge}
-                                  </div>
-                                  <h3>{meta.title}</h3>
-                                  <p
-                                    style={{
-                                      fontSize: 12,
-                                      color: 'var(--muted)',
-                                      marginBottom: 14,
-                                    }}
-                                  >
-                                    {meta.tip}
-                                  </p>
-                                  <Form.Item
-                                    name={['stage_config', stage, 'provider']}
-                                    label="提供商"
-                                  >
-                                    <Select placeholder="选择提供商">
-                                      {config?.providers.map((p) => (
-                                        <Option key={p.id} value={p.id}>
-                                          {p.name}
-                                        </Option>
-                                      ))}
-                                    </Select>
-                                  </Form.Item>
-
-                                  <Form.Item name={['stage_config', stage, 'model']} label="模型">
-                                    <Input placeholder="模型名称" />
-                                  </Form.Item>
-
-                                  <Space>
-                                    <Form.Item
-                                      name={['stage_config', stage, 'temperature']}
-                                      label="Temperature"
-                                    >
-                                      <InputNumber
-                                        min={0}
-                                        max={2}
-                                        step={0.1}
-                                        style={{ width: 120 }}
-                                      />
-                                    </Form.Item>
-
-                                    <Form.Item
-                                      name={['stage_config', stage, 'max_tokens']}
-                                      label="Max Tokens"
-                                    >
-                                      <InputNumber
-                                        min={1000}
-                                        max={32000}
-                                        step={1000}
-                                        style={{ width: 120 }}
-                                      />
-                                    </Form.Item>
-                                  </Space>
-                                </div>
-                              );
-                            })}
+                              <Form.Item
+                                name={['stage_config', stage, 'max_tokens']}
+                                label="Max Tokens"
+                              >
+                                <InputNumber
+                                  min={1000}
+                                  max={32000}
+                                  step={1000}
+                                  style={{ width: 120 }}
+                                />
+                              </Form.Item>
+                            </Space>
                           </div>
-                        </section>
-                      ) : null
-                    }
-                  </Form.Item>
+                        );
+                      })}
+                    </div>
+                  </section>
 
                   <Form.Item>
                     <Button
@@ -624,6 +623,26 @@ const LLMConfigPage: React.FC = () => {
                         tokenSeparators={[',']}
                         options={modelOptions.map((model) => ({ value: model }))}
                       />
+                    </Form.Item>
+                    <Form.Item label="模型上下文窗口" extra="按提供商公布的窗口填写 tokens。未填写的模型使用服务端兼容估算，日志会标注为估算。">
+                      <Form.List name="context_window_entries">
+                        {(fields, { add, remove }) => <>
+                          {fields.map(({ key, name, ...field }) => <Space key={key} align="baseline">
+                            <Form.Item {...field} name={[name, 'model']} rules={[{ required: true, whitespace: true, message: '填写模型名' }]}>
+                              <AutoComplete placeholder="模型名称" options={modelOptions.map((model) => ({ value: model }))} style={{ width: 210 }} />
+                            </Form.Item>
+                            <Form.Item {...field} name={[name, 'tokens']} rules={[{ required: true, message: '填写窗口大小' }]}>
+                              <InputNumber min={8192} max={10000000} precision={0} placeholder="tokens" style={{ width: 150 }} />
+                            </Form.Item>
+                            <Button type="text" aria-label="移除模型窗口" icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                          </Space>)}
+                          <Button type="dashed" onClick={() => add()} icon={<PlusOutlined />}>添加模型窗口</Button>
+                        </>}
+                      </Form.List>
+                    </Form.Item>
+                    <Form.Item name="stream_usage" label="请求流式 token 用量" valuePropName="checked"
+                      extra="仅在提供商支持 stream_options.include_usage 时开启；用于比较估算和真实消耗。">
+                      <Switch />
                     </Form.Item>
                     <Form.Item name="enabled" label="启用" valuePropName="checked">
                       <Switch />

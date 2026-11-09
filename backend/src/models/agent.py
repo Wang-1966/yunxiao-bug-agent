@@ -83,3 +83,10 @@ class AgentLog(BaseModel):
     message: str
     metadata: Optional[dict] = None
     created_at: Optional[datetime] = None
+
+
+class ConversationMessageRequest(BaseModel):
+    text: str = Field(default='', max_length=4000)
+    images: list[str] = Field(default_factory=list, max_length=4)
+    document: Optional[dict] = None
+    client_id: str = Field(min_length=1, max_length=80, pattern=r'^[a-zA-Z0-9_-]+$')

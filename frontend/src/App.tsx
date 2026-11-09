@@ -7,6 +7,7 @@ import Dashboard from './components/Dashboard/Dashboard';
 import BugList from './components/Bugs/BugList';
 import BugDetail from './components/Bugs/BugDetail';
 import AgentList from './components/Agents/AgentList';
+import RepairWorkspace from './components/Agents/RepairWorkspace';
 import LLMConfigPage from './components/LLMConfig/LLMConfigPage';
 import ProjectList from './components/Projects/ProjectList';
 import { ConfirmationSettings } from './components/Settings/ConfirmationSettings';
@@ -138,6 +139,7 @@ const App: React.FC = () => {
             <Route path="bugs" element={<BugList />} />
             <Route path="bugs/:bugId" element={<BugDetail />} />
             <Route path="agents" element={<AgentList />} />
+            <Route path="agents/:agentId" element={<RepairWorkspace />} />
             <Route path="projects" element={<ProjectList />} />
             <Route path="llm-config" element={<LLMConfigPage />} />
             <Route path="confirmation-settings" element={<ConfirmationSettings />} />

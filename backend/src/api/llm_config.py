@@ -83,6 +83,8 @@ def merge_providers(current: list[LLMProvider], incoming: list[LLMProvider]) -> 
             "api_key": api_key,
             "default_model": default_model,
             "available_models": models,
+            **({"context_windows": existing.context_windows} if existing and 'context_windows' not in provider.model_fields_set else {}),
+            **({"stream_usage": existing.stream_usage} if existing and 'stream_usage' not in provider.model_fields_set else {}),
         }))
     return merged
 

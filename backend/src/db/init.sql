@@ -126,6 +126,23 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 
 -- 创建索引
+-- 对话独立于运行日志，按 Bug 聚合，保留不同修复轮次。
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bug_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    text TEXT NOT NULL,
+    images TEXT NOT NULL DEFAULT '[]',
+    document TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    client_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(agent_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_bug ON conversation_messages(bug_id, id);
+CREATE INDEX IF NOT EXISTS idx_conversation_pending ON conversation_messages(agent_id, status, id);
+
 CREATE INDEX IF NOT EXISTS idx_bugs_status ON bugs(status);
 CREATE INDEX IF NOT EXISTS idx_bugs_priority ON bugs(priority);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);

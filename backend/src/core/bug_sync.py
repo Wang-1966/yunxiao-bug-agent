@@ -65,9 +65,22 @@ async def run_yunxiao_sync_loop(settings, sleep=asyncio.sleep):
 
 
 async def _write_synced_bugs(settings):
-    items = await YunxiaoClient(settings).list_my_bugs()
+    client = YunxiaoClient(settings)
+    items = await client.list_my_bugs()
+    db_path = settings.database_url.replace("sqlite+aiosqlite:///", "")
+    listed_ids = {item["id"] for item in items}
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("SELECT bug_id FROM bugs WHERE source = 'yunxiao'")
+        tracked_ids = [row[0] for row in await cursor.fetchall()]
+    # 负责人变更后会移出“我的 Bug”，已入库记录仍需从详情刷新，不能视为无变化。
+    for bug_id in tracked_ids:
+        if bug_id not in listed_ids:
+            try:
+                items.append(await client.get_bug(bug_id))
+            except YunxiaoError as exc:
+                raise YunxiaoError(f"刷新已入库 Bug {bug_id} 失败，本次同步未写入：{exc}") from exc
     counts = {"total": len(items), "created": 0, "updated": 0, "unchanged": 0}
-    async with aiosqlite.connect(settings.database_url.replace("sqlite+aiosqlite:///", "")) as db:
+    async with aiosqlite.connect(db_path) as db:
         await db.execute("BEGIN IMMEDIATE")
         for item in items:
             bug_id = item["id"]

@@ -16,6 +16,7 @@ from ..agent.state import BugFixState
 from ..config import get_settings
 from .projects import resolve_project_config
 from .repair_merge import discard_worktree
+from .repair_executor import prepare_worktree_dependencies
 from .bug_inputs import read_supplement
 
 settings = get_settings()
@@ -122,6 +123,8 @@ class MultiAgentOrchestrator:
     async def stop(self):
         """停止协调器"""
         self._running = False
+        from .agent_discussion import stop_all
+        await stop_all()
         if self._schedule_task:
             self._schedule_task.cancel()
             await asyncio.gather(self._schedule_task, return_exceptions=True)
@@ -269,6 +272,7 @@ class MultiAgentOrchestrator:
         """
         try:
             task.status = "running"
+            self.agent_states[agent_id]['state']['stage'] = 'analyzing'
             await self._save_status(agent_id, task, "busy", "analyzing", "Agent 开始执行")
             # 创建状态图
             workflow = create_bug_fix_graph()
@@ -474,6 +478,8 @@ class MultiAgentOrchestrator:
         # 详情加载与图执行都属于后台任务，异常由统一任务状态记录。
         task.status = 'running'
         try:
+            _, bug_status, _, label = RESUME_POINTS[start_node]
+            await self._save_status(agent_id, task, 'busy', bug_status, f'继续执行：{label}')
             from ..agent.nodes import fetch_bug_node
             result = await fetch_bug_node(state)
             if result.get('error'):
@@ -485,6 +491,8 @@ class MultiAgentOrchestrator:
                 row = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (task.bug_id,))).fetchone()
                 config = await resolve_project_config(db, dict(row))
             state['bug_info'].update({key: config.get(key) for key in ('repo_path', 'branch', 'test_command', 'preview_command', 'preview_env_files', 'preview_port')})
+            if state.get('worktree_path') and config.get('repo_path'):
+                await prepare_worktree_dependencies(config['repo_path'], state['worktree_path'])
             workflow = compile_graph(create_bug_fix_graph(start_node=start_node))
             await self._run_agent_from_state(agent_id, task, state, workflow)
         except asyncio.CancelledError:
@@ -557,53 +565,60 @@ class MultiAgentOrchestrator:
 
         已提交验收（存在 verify 决策）的任务交付记录与 task_id 绑定，按反馈新建任务重新修复。
         """
+        async with self._agent_control_lock:
+            return await self._retry_agent_locked(agent_id, priority)
+
+    async def _retry_agent_locked(self, agent_id: str, priority: int = 5) -> dict:
+        """调用方持有控制锁；聊天续跑与按钮重试共享校验和排队逻辑。"""
         if not self._running:
             raise RuntimeError("任务调度器未启动")
-        async with self._agent_control_lock:
-            db_path = settings.database_url.replace('sqlite+aiosqlite:///', '')
+        from .agent_discussion import busy
+        if busy(agent_id):
+            raise ValueError('Agent 正在回复，请等待或停止回复后再执行')
+        db_path = settings.database_url.replace('sqlite+aiosqlite:///', '')
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            agent = await (await db.execute('SELECT * FROM agents WHERE agent_id=?', (agent_id,))).fetchone()
+            if agent is None:
+                raise KeyError(agent_id)
+            history = await (await db.execute('SELECT * FROM task_history WHERE agent_id=? ORDER BY id DESC LIMIT 1', (agent_id,))).fetchone()
+            bug = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (agent['current_bug_id'],))).fetchone()
+            reviewed = await (await db.execute("SELECT 1 FROM decisions WHERE agent_id=? AND stage='verify'", (agent_id,))).fetchone()
+            supplement = await read_supplement(db, agent['current_bug_id'])
+        if agent['status'] != 'error' or agent_id in self.running_agents or not history:
+            raise ValueError('只有已失败或已停止的任务可以重新执行')
+        # Bug 被其他任务删除释放后，原任务可重新认领并续跑。
+        claimable = bug and (bug['assigned_agent_id'] == agent_id and bug['status'] == 'failed' or bug['assigned_agent_id'] is None and bug['status'] in ('pending', 'failed'))
+        if not claimable or (bug['source_status'] or '') in ('已修复', '已关闭', '暂不修复'):
+            raise ValueError('该 Bug 已由其他任务处理或不可修复，请刷新页面')
+        saved = json.loads(history['result'] or '{}')
+        previous_supplement = saved.get('input_snapshot', {}).get('supplement', {'notes': '', 'image_names': [], 'revision': 0})
+        if supplement != previous_supplement:
+            start_node, reason = None, '补充修复信息已更新，需要重新分析根因'
+        elif reviewed:
+            start_node, reason = None, '上次修复已提交验收'
+        else:
+            start_node, reason = await self._resume_point(saved)
+        if start_node is None:
+            bug_id = bug['bug_id']
+        else:
+            stage, bug_status, progress, label = RESUME_POINTS[start_node]
+            message = f'重新执行：{reason}，从「{label}」继续'
+            if start_node != 'fetch_bug':
+                message += f"，复用工作树 {saved['worktree_path']}"
             async with aiosqlite.connect(db_path) as db:
-                db.row_factory = aiosqlite.Row
-                agent = await (await db.execute('SELECT * FROM agents WHERE agent_id=?', (agent_id,))).fetchone()
-                if agent is None:
-                    raise KeyError(agent_id)
-                history = await (await db.execute('SELECT * FROM task_history WHERE agent_id=? ORDER BY id DESC LIMIT 1', (agent_id,))).fetchone()
-                bug = await (await db.execute('SELECT * FROM bugs WHERE bug_id=?', (agent['current_bug_id'],))).fetchone()
-                reviewed = await (await db.execute("SELECT 1 FROM decisions WHERE agent_id=? AND stage='verify'", (agent_id,))).fetchone()
-                supplement = await read_supplement(db, agent['current_bug_id'])
-            if agent['status'] != 'error' or agent_id in self.running_agents or not history:
-                raise ValueError('只有已失败或已停止的任务可以重新执行')
-            # Bug 被其他任务删除释放后，原任务可重新认领并续跑。
-            claimable = bug and (bug['assigned_agent_id'] == agent_id and bug['status'] == 'failed' or bug['assigned_agent_id'] is None and bug['status'] in ('pending', 'failed'))
-            if not claimable or (bug['source_status'] or '') in ('已修复', '已关闭', '暂不修复'):
-                raise ValueError('该 Bug 已由其他任务处理或不可修复，请刷新页面')
-            saved = json.loads(history['result'] or '{}')
-            previous_supplement = saved.get('input_snapshot', {}).get('supplement', {'notes': '', 'image_names': [], 'revision': 0})
-            if supplement != previous_supplement:
-                start_node, reason = None, '补充修复信息已更新，需要重新分析根因'
-            elif reviewed:
-                start_node, reason = None, '上次修复已提交验收'
-            else:
-                start_node, reason = await self._resume_point(saved)
-            if start_node is None:
-                bug_id = bug['bug_id']
-            else:
-                stage, bug_status, progress, label = RESUME_POINTS[start_node]
-                message = f'重新执行：{reason}，从「{label}」继续'
-                if start_node != 'fetch_bug':
-                    message += f"，复用工作树 {saved['worktree_path']}"
-                async with aiosqlite.connect(db_path) as db:
-                    await db.execute('BEGIN IMMEDIATE')
-                    cursor = await db.execute(
-                        "UPDATE bugs SET status=?, assigned_agent_id=?, updated_at=CURRENT_TIMESTAMP WHERE bug_id=? "
-                        "AND (assigned_agent_id=? AND status='failed' OR assigned_agent_id IS NULL AND status IN ('pending', 'failed'))",
-                        (bug_status, agent_id, bug['bug_id'], agent_id),
-                    )
-                    if cursor.rowcount != 1:
-                        raise ValueError('该 Bug 已由其他任务处理，请刷新页面')
-                    await db.execute("UPDATE agents SET status='busy', updated_at=CURRENT_TIMESTAMP WHERE agent_id=?", (agent_id,))
-                    await db.execute("UPDATE task_history SET stage='queued', status='running', error=NULL, end_time=NULL WHERE id=?", (history['id'],))
-                    await db.execute("INSERT INTO agent_logs (agent_id, bug_id, log_level, message) VALUES (?, ?, 'info', ?)", (agent_id, bug['bug_id'], message))
-                    await db.commit()
+                await db.execute('BEGIN IMMEDIATE')
+                cursor = await db.execute(
+                    "UPDATE bugs SET status=?, assigned_agent_id=?, updated_at=CURRENT_TIMESTAMP WHERE bug_id=? "
+                    "AND (assigned_agent_id=? AND status='failed' OR assigned_agent_id IS NULL AND status IN ('pending', 'failed'))",
+                    (bug_status, agent_id, bug['bug_id'], agent_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError('该 Bug 已由其他任务处理，请刷新页面')
+                await db.execute("UPDATE agents SET status='busy', updated_at=CURRENT_TIMESTAMP WHERE agent_id=?", (agent_id,))
+                await db.execute("UPDATE task_history SET stage='queued', status='running', error=NULL, end_time=NULL WHERE id=?", (history['id'],))
+                await db.execute("INSERT INTO agent_logs (agent_id, bug_id, log_level, message) VALUES (?, ?, 'info', ?)", (agent_id, bug['bug_id'], message))
+                await db.commit()
         if start_node is None:
             task_id = await self.submit_task(bug_id, priority)
             return {'agent_id': f'agent-{task_id}', 'task_id': task_id, 'mode': 'restart', 'reason': reason}
@@ -642,6 +657,8 @@ class MultiAgentOrchestrator:
             await self._stop_agent(agent_id)
 
     async def _stop_agent(self, agent_id: str):
+        from .agent_discussion import stop
+        await stop(agent_id)
         db_path = settings.database_url.replace("sqlite+aiosqlite:///", "")
         async with aiosqlite.connect(db_path) as db:
             delivering = await (await db.execute("SELECT 1 FROM decisions WHERE agent_id=? AND status='delivering'", (agent_id,))).fetchone()
@@ -701,7 +718,7 @@ class MultiAgentOrchestrator:
                     "updated_at=CURRENT_TIMESTAMP WHERE assigned_agent_id=?",
                     (agent_id,),
                 )
-                for table in ("decisions", "task_history", "agent_logs"):
+                for table in ("decisions", "task_history", "agent_logs", "conversation_messages"):
                     await db.execute(f"DELETE FROM {table} WHERE agent_id=?", (agent_id,))
                 await db.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
                 await db.commit()
@@ -726,6 +743,9 @@ class MultiAgentOrchestrator:
             del self.running_agents[agent_id]
 
         logger.info(f"Agent {agent_id} removed from running list. Active: {len(self.running_agents)}")
+        if not task.cancelled() and self._running:
+            from .agent_discussion import resume_pending
+            asyncio.create_task(resume_pending(agent_id, self))
 
     def get_agent_status(self, agent_id: str) -> Optional[Dict]:
         """

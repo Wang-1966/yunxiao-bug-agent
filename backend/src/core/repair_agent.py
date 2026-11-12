@@ -17,6 +17,8 @@ from loguru import logger
 from ..config import get_settings
 from ..prompts import render_prompt
 from .analysis_decisions import ChangeImpact, DecisionQuestion, normalize_decisions
+from .acceptance import AcceptanceCheck, acceptance_plan
+from .repair_summary import RepairSummary
 from .agent_tools import (ToolError, Workspace, build_tools, clip_output, is_test_path, prefers_apply_patch, run_in_worktree, sandbox_available)
 from .browser_tool import close_browser
 from .repair_executor import changed_files, git
@@ -66,17 +68,24 @@ def protected_dirs() -> list:
 
 async def repository_context(worktree) -> dict:
     """AGENTS.md 全文与根目录概览，写入分析任务提示词。"""
+    from .runtime_config import engine
     root = Path(worktree)
     names = [n for n in (await git(root, 'ls-files', '-z')).split('\0') if n]
     counts = Counter(name.split('/')[0] for name in names)
     inventory = '\n'.join(f'{name}：{count} 个文件' for name, count in sorted(counts.items()))
-    return {'instructions': Workspace(root).instructions() or '无', 'inventory': inventory}
+    instructions = ('根目录规范由 Pi 资源加载器载入；读取子目录文件前先检查适用的 AGENTS.md。'
+                    if engine() == 'pi' else Workspace(root).instructions() or '无')
+    return {'instructions': instructions, 'inventory': inventory}
 
 
 def system_prompt(editor='edit_file', browser=False) -> str:
-    note = 'run_command（沙箱内运行测试、类型检查、构建、安装依赖）' if sandbox_available() else '本环境不支持命令沙箱，无法运行命令，只能静态分析（系统在你提交时仍会运行复现命令）'
+    from .runtime_config import engine
+    pi = engine() == 'pi'
+    inventory = 'read、grep、ls、find、edit、write' if pi else f'read_file、grep、list_dir、find_files、{editor}'
+    command = 'bash' if pi else 'run_command'
+    note = f'{command}（沙箱内运行测试、类型检查、构建、安装依赖）' if sandbox_available() else '本环境不支持命令沙箱，无法运行命令，只能静态分析（系统在你提交时仍会运行复现命令）'
     browser_note = 'browser（打开项目预览，点击、输入、截图核对界面）' if browser else '未配置预览命令，不能打开页面'
-    return render_prompt('agent_system', commands_note=note, editor=editor, browser_note=browser_note)
+    return render_prompt('agent_system', commands_note=note, inventory=inventory, browser_note=browser_note)
 
 
 def new_session(user_prompt: str, extra_system: str = '', *, editor='edit_file', browser=False) -> list:
@@ -151,7 +160,8 @@ def _analysis_tool(workspace, worktree, holder):
             reason = _text(repro.get('not_reproducible_reason'), 'reproduction.not_reproducible_reason（没有复现命令时必须说明无法自动化复现的具体原因）')
             record['not_reproducible_reason'] = reason
         holder['analysis'] = {'symptom': symptom, 'open_questions': open_questions, 'hypotheses': normalized, 'root_cause': root_cause,
-                              'trigger_paths': paths, 'proposals': clean, **decisions}
+                              'trigger_paths': paths, 'proposals': clean, **decisions,
+                              'acceptance_plan': acceptance_plan(symptom, args.get('acceptance_checks'), record)}
         holder['repro'] = record
         return holder['analysis']
 
@@ -171,8 +181,9 @@ def _analysis_tool(workspace, worktree, holder):
             'root_cause': {'type': 'string', 'description': '触发条件到症状的完整因果链，引用 文件:行号'},
             'trigger_paths': {'type': 'array', 'items': {'type': 'string'}, 'description': '所有能触发该症状的代码路径'},
             'reproduction': {'type': 'object', 'properties': {'command': {'type': 'string', 'description': '复现命令；无法复现时留空'}, 'test_files': {'type': 'array', 'items': {'type': 'string'}}, 'not_reproducible_reason': {'type': 'string'}}},
+            'acceptance_checks': {'type': 'array', 'items': AcceptanceCheck.model_json_schema(), 'description': '逐项对应 symptom.acceptance；自动覆盖写具体断言与复现测试文件，其他条目写人工操作步骤。不要把构建通过当作业务验收通过。'},
             'proposals': {'type': 'array', 'items': proposal}},
-         'required': ['symptom', 'hypotheses', 'root_cause', 'reproduction', 'proposals', 'decision_questions', 'assumptions', 'verification_limits']}, validate)
+         'required': ['symptom', 'hypotheses', 'root_cause', 'reproduction', 'proposals', 'decision_questions', 'assumptions', 'verification_limits', 'acceptance_checks']}, validate)
 
 
 def compose_report_simple(analysis, repro) -> str:
@@ -282,6 +293,12 @@ async def _diff_text(worktree) -> str:
 def _fix_tool(workspace, worktree, repro, holder):
     async def validate(args):
         summary = _text(args.get('summary'), 'summary')
+        brief = None
+        if 'repair_summary' in args:
+            try:
+                brief = RepairSummary.model_validate(args['repair_summary']).model_dump()
+            except ValueError as exc:
+                raise ToolError(f'修复摘要无效，请分别用不超过 180 字概括根因和实际修复方案：{exc}') from exc
         changed = await changed_files(worktree)
         if not [name for name in changed if not is_test_path(name)]:
             raise ToolError('还没有修改任何业务源码（只有测试文件的改动不算修复）。请修改业务源码后再提交')
@@ -296,11 +313,14 @@ def _fix_tool(workspace, worktree, repro, holder):
             result.update(exit_after=code, output_after=clip_output(output, 3000))
             if code != 0:
                 raise ToolError(f'复现命令在修复后仍然失败（退出码 {code}），问题还没有修好。输出：\n{clip_output(output, 4000)}')
-        holder.update(summary=summary, repro=result)
+        holder.update(summary=summary, repair_summary=brief, repro=result)
         return {'summary': summary}
 
     return submit_tool('submit_fix', '提交修复。系统会重新运行复现命令，必须通过；复现测试不能被修改。',
-                       {'type': 'object', 'properties': {'summary': {'type': 'string', 'description': '实际修改了什么、为什么能消除症状、运行了哪些验证'}}, 'required': ['summary']}, validate)
+                       {'type': 'object', 'properties': {
+                           'summary': {'type': 'string', 'description': '完整工程记录：实际修改、依据、验证和限制，保存在详情中'},
+                           'repair_summary': RepairSummary.model_json_schema(),
+                       }, 'required': ['summary', 'repair_summary']}, validate)
 
 
 async def run_merge_resolution(worktree, files, llm=None):
@@ -327,7 +347,7 @@ async def run_merge_resolution(worktree, files, llm=None):
                      {'type': 'object', 'properties': {'summary': {'type': 'string', 'description': '双方分别保留了什么'}}, 'required': ['summary']}, validate)]
     prompt = (
         '把目标分支合并进当前修复时发生冲突。冲突文件：\n' + listed +
-        '\n\n请先 read_file 这些文件。冲突标记 <<<<<<< ======= >>>>>>> 之间，上面是本次修复，下面是目标分支已有改动。'
+        '\n\n请先读取这些文件。冲突标记 <<<<<<< ======= >>>>>>> 之间，上面是本次修复，下面是目标分支已有改动。'
         '编辑文件去掉标记，两边的功能都要留下，不能只保留一边。完成后调用 submit_merge。不要执行 git commit。'
     )
     messages = [{'role': 'system', 'content': '你只负责解决合并冲突，保留双方已有功能。阶段结束必须调用 submit_merge。'},
@@ -359,7 +379,7 @@ async def run_fix(llm, reviewer, worktree, prompt, *, bug, analysis, repro, visu
     messages = load_session(path)
 
     # 增强提示：强调测试验证和自我检查
-    extra_instructions = '\n\n重要：\n- 修改代码后立即运行相关测试验证\n- 确保复现测试能通过\n- 不确定时用 run_command 运行测试检查\n- 提交前确认所有改动都是必要的'
+    extra_instructions = '\n\n重要：\n- 修改代码后立即运行相关测试验证\n- 确保复现测试能通过\n- 不确定时使用命令工具运行测试检查\n- 提交前确认所有改动都是必要的'
 
     if messages:
         messages.append({'role': 'user', 'content': prompt + extra_instructions})
@@ -380,6 +400,7 @@ async def run_fix(llm, reviewer, worktree, prompt, *, bug, analysis, repro, visu
 
         return {
             'summary': summary,
+            'repair_summary': holder.get('repair_summary'),
             'review': {'status': 'skipped', 'refuted': False, 'summary': '已改为工具验证模式'},
             'repro': holder['repro'],
             'source_context': {'reads': workspace.read_requests[-MAX_CONTEXT_READS:]}

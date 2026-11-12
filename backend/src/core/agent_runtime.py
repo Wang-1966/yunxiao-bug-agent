@@ -24,13 +24,19 @@ async def run_tool_agent(llm, messages, tools, **kwargs):
             if not isinstance(question, str) or not question.strip():
                 raise ToolError('question 不能为空')
             await stream.say(question.strip())
-            while time.monotonic() < deadline:
-                items = await conversation.pending(agent_id)
-                if items:
-                    await conversation.delivered(agent_id, [item['id'] for item in items])
-                    return {'text': '\n'.join(item['text'] for item in items), 'images': [url for item in items for url in item['images']]}
-                await asyncio.sleep(0.5)
-            raise ToolError('等待用户回复超时；消息保留，可重新执行')
+            decision_id = await conversation.begin_question(agent_id, question.strip())
+            answered = False
+            try:
+                while time.monotonic() < deadline:
+                    items = await conversation.pending(agent_id)
+                    if items:
+                        await conversation.delivered(agent_id, [item['id'] for item in items])
+                        answered = True
+                        return {'text': '\n'.join(item['text'] for item in items), 'images': [url for item in items for url in item['images']]}
+                    await asyncio.sleep(0.5)
+                raise ToolError('等待用户回复超时；消息保留，可重新执行')
+            finally:
+                await conversation.finish_question(decision_id, answered=answered)
 
         async def view_chat_image(args):
             url = await conversation.image_data(agent_id, args.get('message_id'), args.get('index', 1) - 1)

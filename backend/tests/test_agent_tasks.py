@@ -374,6 +374,60 @@ async def run_verified_repair(task_db, tmp_path, monkeypatch, command=None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('confirmed', [True, False])
+async def test_item_acceptance_is_persisted_and_failed_items_reach_next_round(task_db, tmp_path, monkeypatch, confirmed):
+    from src.core.repair_executor import git
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    with patch.object(agents, 'get_orchestrator', return_value=runner):
+        current = await agents.get_agent(agent_id)
+        assert current.attention['kind'] == 'acceptance'
+        report = current.acceptance
+        assert report['criteria'] and report['legacy'] is True
+        request = {'confirmed': confirmed, 'acceptance_version': report['version'], 'git_commit_hash': current.git_commit_hash,
+                   'acceptance_results': [{'criterion_id': item['id'], 'status': 'passed' if confirmed else 'failed',
+                                           'feedback': '' if confirmed else '第二次保存仍失败'} for item in report['criteria']]}
+        # 请求必须在完整标记后才能交付，拒绝时不能消费待决记录。
+        if confirmed:
+            with pytest.raises(HTTPException) as exc:
+                await agents.confirm_agent_repair(agent_id, RepairConfirmation(**{**request, 'acceptance_results': []}))
+            assert exc.value.status_code == 409
+            await git(tmp_path / 'source', 'restore', 'app.py')
+        result = await agents.confirm_agent_repair(agent_id, RepairConfirmation(**request))
+        after = await agents.get_agent(agent_id)
+        assert after.confirmation['user_choice']['acceptance']['git_commit_hash'] == current.git_commit_hash
+        assert after.confirmation['user_choice']['acceptance']['criteria'][0]['status'] == ('passed' if confirmed else 'failed')
+        assert after.attention is None
+        if not confirmed:
+            from src.core.repair_attempts import latest_rejected_attempt, attempt_prompt
+            previous = await latest_rejected_attempt(str(task_db), 'one')
+            assert '第二次保存仍失败' in attempt_prompt(previous)
+            assert previous['acceptance']['criteria'][0]['status'] == 'failed'
+            assert result['restart']['started'] is True
+
+
+@pytest.mark.asyncio
+async def test_item_acceptance_does_not_deliver_unreviewed_conflict_resolution(task_db, tmp_path, monkeypatch):
+    from src.core.repair_executor import git
+    runner, agent_id = await run_verified_repair(task_db, tmp_path, monkeypatch)
+    repo = tmp_path / 'source'
+    (repo / 'app.py').write_text('value = 99\n')
+    await git(repo, 'add', 'app.py')
+    await git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'target changed')
+    head = await git(repo, 'rev-parse', 'HEAD')
+    with patch.object(agents, 'get_orchestrator', return_value=runner), patch('src.core.repair_merge.resolve_merge_with_agent', new_callable=AsyncMock) as resolver:
+        before = await agents.get_agent(agent_id)
+        report = before.acceptance
+        with pytest.raises(HTTPException) as exc:
+            await agents.confirm_agent_repair(agent_id, RepairConfirmation(confirmed=True, git_commit_hash=before.git_commit_hash,
+                acceptance_version=report['version'], acceptance_results=[{'criterion_id': item['id'], 'status': 'passed'} for item in report['criteria']]))
+        assert '重新修复' in str(exc.value.detail)
+        resolver.assert_not_called()
+        assert await git(repo, 'rev-parse', 'HEAD') == head
+        assert await git(before.worktree_path, 'rev-parse', 'HEAD') == before.git_commit_hash
+        assert (await agents.get_agent(agent_id)).confirmation['status'] == 'pending'
+
+
+@pytest.mark.asyncio
 async def test_proposal_feedback_reanalyzes_until_explicit_confirmation(task_db, tmp_path):
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
@@ -810,15 +864,16 @@ async def test_only_latest_rejected_round_is_carried_and_auto_restart_is_capped(
     assert attempt['diff_stat'] == 'diff 第二轮根因' and attempt['image_count'] == 1
     assert attempt['evidence_reads'] == [{'path': 'agent-b.vue'}]
 
+    from src.core.repair_review import restart_rejected_repair
     runner = orchestrator.MultiAgentOrchestrator()
     with patch.object(agents, 'get_orchestrator', return_value=runner):
-        failed = await agents._restart_rejected_repair('one')
+        failed = await restart_rejected_repair(str(task_db), runner, 'one')
         assert failed['started'] is False and '可手动重新执行' in failed['reason']
         runner._running = True
         async with aiosqlite.connect(task_db) as db:
             await add_decision(db, 'v-c', 'agent-b', 'verify', {'confirmed': False, 'feedback': '第三轮仍错'})
             await db.commit()
-        capped = await agents._restart_rejected_repair('one')
+        capped = await restart_rejected_repair(str(task_db), runner, 'one')
     assert capped['started'] is False and '连续 3 轮' in capped['reason']
     assert runner.task_queue.empty()
 

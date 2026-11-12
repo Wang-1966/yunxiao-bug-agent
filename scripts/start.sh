@@ -15,7 +15,7 @@ if [ ! -d "backend" ] || [ ! -d "frontend" ]; then
 fi
 
 # 1. 安装后端依赖
-echo "📦 [1/4] 安装后端依赖..."
+echo "📦 [1/5] 安装后端依赖..."
 cd backend
 if [ -n "${BACKEND_PYTHON:-}" ]; then
     if ! "$BACKEND_PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
@@ -48,8 +48,25 @@ venv/bin/python -m pip install -r requirements.txt
 echo "✅ 后端依赖安装完成"
 echo ""
 
-# 2. 安装前端依赖
-echo "📦 [2/4] 安装前端依赖..."
+# 2. 准备默认 Pi 内核
+echo "📦 [2/5] 准备 Pi 执行内核..."
+REPAIR_ENGINE=$(venv/bin/python -c 'from src.core.runtime_config import engine; print(engine())')
+if [ "$REPAIR_ENGINE" = "pi" ]; then
+    if ! command -v node >/dev/null 2>&1 || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)'; then
+        echo "❌ Pi 执行内核要求 Node.js 22.19 或更新版本"
+        exit 1
+    fi
+    if [ ! -f "pi/node_modules/@earendil-works/pi-coding-agent/package.json" ]; then
+        npm ci --prefix pi
+    fi
+    echo "✅ Pi 依赖已就绪"
+else
+    echo "✅ 已显式选择 native，跳过 Pi 依赖准备"
+fi
+echo ""
+
+# 3. 安装前端依赖
+echo "📦 [3/5] 安装前端依赖..."
 cd ../frontend
 if [ ! -d "node_modules" ]; then
     npm install
@@ -59,8 +76,8 @@ fi
 echo "✅ 前端依赖安装完成"
 echo ""
 
-# 3. 启动后端
-echo "🚀 [3/4] 启动后端服务..."
+# 4. 启动后端
+echo "🚀 [4/5] 启动后端服务..."
 cd ../backend
 BACKEND_STARTED=1
 if lsof -nP -iTCP:8000 -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -99,8 +116,8 @@ else
 fi
 echo ""
 
-# 4. 启动前端
-echo "🚀 [4/4] 启动前端服务..."
+# 5. 启动前端
+echo "🚀 [5/5] 启动前端服务..."
 cd ../frontend
 npm run dev &
 FRONTEND_PID=$!

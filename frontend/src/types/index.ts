@@ -45,6 +45,41 @@ export interface AnalysisReport {
   trigger_paths?: string[];
 }
 
+export interface CriterionReview {
+  criterion_id: string;
+  status: 'passed' | 'failed';
+  feedback: string;
+}
+
+export interface VerificationCheck {
+  id: string;
+  kind: string;
+  label: string;
+  command?: string;
+  exit_code?: number;
+  passed?: boolean;
+  output?: string;
+  completed_at?: string;
+  duration_ms?: number;
+}
+
+export interface AcceptanceEvidence {
+  version: string;
+  git_commit_hash?: string;
+  current: boolean;
+  legacy: boolean;
+  criteria: { id: string; text: string; method: 'reproduction' | 'manual'; detail: string; test_files: string[];
+    automatic_status: 'passed' | 'failed' | 'not_run' | 'manual' | 'stale'; evidence_ids: string[] }[];
+  checks: VerificationCheck[];
+  verification_limits: string[];
+  reproduction_before?: { command?: string; reproduced?: boolean; exit_before?: number; output_before?: string; not_reproducible_reason?: string };
+}
+
+export interface RepairSummary {
+  root_cause: string;
+  solution: string;
+}
+
 export interface AgentStatus {
   agent_id: string;
   name: string;
@@ -64,9 +99,12 @@ export interface AgentStatus {
   repro?: { command?: string; reproduced?: boolean; exit_before?: number; not_reproducible_reason?: string; test_files?: string[] };
   review?: { status?: string; summary?: string; findings?: { location: string; detail: string }[] };
   fix_summary?: string;
+  repair_summary?: RepairSummary;
   error?: string;
   test_results?: { passed?: boolean; command?: string; exit_code?: number; output?: string };
-  confirmation?: { decision_id: string; status: string; user_choice?: { confirmed: boolean; feedback: string; images?: string[]; merge?: { cleanup_pending?: boolean; cleanup_error?: string }; yunxiao_sync?: { status: 'pending' | 'succeeded' | 'failed'; target: string; error?: string } }; answered_at?: string };
+  acceptance?: AcceptanceEvidence;
+  attention?: { kind: 'proposal' | 'acceptance' | 'question' | 'error' | 'delivery'; summary: string; since?: string; decision_id?: string };
+  confirmation?: { decision_id: string; status: string; user_choice?: { confirmed: boolean; feedback: string; images?: string[]; acceptance?: { version: string; git_commit_hash?: string; criteria: (CriterionReview & { text: string })[] }; merge?: { cleanup_pending?: boolean; cleanup_error?: string }; yunxiao_sync?: { status: 'pending' | 'succeeded' | 'failed'; target: string; error?: string } }; answered_at?: string };
   // 新增：阶段耗时统计
   stage_timings?: {
     analyze?: number;    // 分析阶段耗时（秒）

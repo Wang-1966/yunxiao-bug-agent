@@ -105,6 +105,7 @@ class MultiAgentOrchestrator:
             await db.execute('BEGIN IMMEDIATE')
             # 合并已开始但进程中断时，允许再次验收；提交祖先检查避免重复合并。
             await db.execute("UPDATE decisions SET status='pending' WHERE stage='verify' AND status='delivering'")
+            await db.execute("UPDATE decisions SET status='timeout', answered_at=CURRENT_TIMESTAMP WHERE stage='question' AND status='pending'")
             await rename_stiff_agent_names(db)
             cursor = await db.execute("SELECT agent_id, current_bug_id FROM agents WHERE status IN ('busy', 'paused')")
             for agent_id, bug_id in await cursor.fetchall():
@@ -395,7 +396,7 @@ class MultiAgentOrchestrator:
             runtime = self.agent_states.get(agent_id, {})
             state = runtime.get('state', {})
             # 输入快照保留原始正文和图片文件引用，不持久化图片 base64 或临时签名地址。
-            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'analysis', 'repro', 'review', 'proposals', 'selected_proposal', 'fix_summary', 'modified_files', 'test_results', 'error', 'failed_node', 'repair_feedback', 'previous_attempt') if key in state}
+            result = {key: state[key] for key in ('worktree_path', 'repair_branch', 'base_commit', 'git_commit_hash', 'root_cause', 'confidence', 'need_logging', 'analysis', 'repro', 'review', 'proposals', 'selected_proposal', 'fix_summary', 'repair_summary', 'modified_files', 'test_results', 'error', 'failed_node', 'repair_feedback', 'previous_attempt') if key in state}
             result['progress'] = runtime.get('progress', 0)
             result['input_snapshot'] = state.get('input_snapshot', task.input_snapshot)
             # 文字观察和正文指纹单独保存；续跑按快照文件引用读取原图。
@@ -409,8 +410,8 @@ class MultiAgentOrchestrator:
             )
             if bug_status == 'awaiting_confirmation':
                 await db.execute(
-                    "INSERT OR IGNORE INTO decisions (decision_id, bug_id, agent_id, stage, question, options) SELECT ?, ?, ?, 'verify', '请确认此 Bug 是否已修复', ? WHERE EXISTS (SELECT 1 FROM bugs WHERE bug_id=? AND assigned_agent_id=? AND status='awaiting_confirmation')",
-                    (f'review-{task.task_id}', task.bug_id, agent_id, json.dumps(['已修复', '未修复'], ensure_ascii=False), task.bug_id, agent_id),
+                    "INSERT OR IGNORE INTO decisions (decision_id, bug_id, agent_id, stage, question, options) SELECT ?, ?, ?, 'verify', '请确认此 Bug 是否已修复', ? WHERE EXISTS (SELECT 1 FROM bugs WHERE bug_id=? AND assigned_agent_id=? AND status='awaiting_confirmation') AND NOT EXISTS (SELECT 1 FROM decisions WHERE agent_id=? AND stage='verify' AND status IN ('pending', 'delivering'))",
+                    (f'review-{task.task_id}-{uuid.uuid4().hex[:8]}', task.bug_id, agent_id, json.dumps(['已修复', '未修复'], ensure_ascii=False), task.bug_id, agent_id, agent_id),
                 )
             if bug_status == 'awaiting_plan_confirmation':
                 await db.execute(
@@ -464,12 +465,72 @@ class MultiAgentOrchestrator:
                  'proposals': [] if has_feedback else proposals,
                  'selected_proposal': None if has_feedback else proposals[proposal_index],
                  'modified_files': [], 'test_results': {}, 'waiting_for_user': False,
+                 'fix_summary': None, 'repair_summary': None,
                  'user_decision': choice, 'error': None, 'require_plan_confirmation': True}
         self.agent_states[agent_id] = {'agent_id': agent_id, 'task': task, 'state': state, 'status': 'running', 'progress': 10 if has_feedback else 45}
         task_handle = asyncio.create_task(self._resume_proposal(agent_id, task, state, has_feedback))
         self.running_agents[agent_id] = task_handle
         task_handle.add_done_callback(lambda t: self._on_agent_complete(agent_id, t))
         return {'agent_id': agent_id, 'status': stage}
+
+    async def continue_fix(self, agent_id: str, feedback: str, images: list = None):
+        """验收认可根因与方案、但实现不到位：在原工作树保留上一轮修改继续修复，再次验证后重新验收。调用方持有控制锁。"""
+        from .rich_input import save_rich_input
+        from .repair_review import _delivery_lock
+        from .repair_attempts import MAX_AUTO_REPAIR_ROUNDS, rejected_rounds, preserve_attempt
+        from .repair_executor import git
+        from .preview_manager import stop_preview
+        db_path = settings.database_url.replace('sqlite+aiosqlite:///', '')
+        feedback, image_names, _ = save_rich_input(db_path, feedback, images or [], None, max_length=4000)
+        if not feedback and not image_names:
+            raise ValueError('请说明仍需修改的现象，供继续修复使用')
+        async with _delivery_lock:
+            async with aiosqlite.connect(db_path) as db:
+                db.row_factory = aiosqlite.Row
+                agent = await (await db.execute('SELECT * FROM agents WHERE agent_id=?', (agent_id,))).fetchone()
+                history = await (await db.execute('SELECT * FROM task_history WHERE agent_id=? ORDER BY id DESC LIMIT 1', (agent_id,))).fetchone()
+                decision = await (await db.execute("SELECT * FROM decisions WHERE agent_id=? AND stage='verify' ORDER BY id DESC LIMIT 1", (agent_id,))).fetchone()
+                bug = await (await db.execute('SELECT * FROM bugs WHERE assigned_agent_id=?', (agent_id,))).fetchone()
+                if not agent or not history or not decision or decision['status'] != 'pending' or agent['status'] != 'awaiting_confirmation' or not bug or bug['status'] != 'awaiting_confirmation':
+                    raise ValueError('该修复结果已处理或不是当前待验收任务，请刷新页面')
+                config = await resolve_project_config(db, dict(bug))
+            saved = json.loads(history['result'] or '{}')
+            worktree, base, commit = agent['worktree_path'], saved.get('base_commit'), saved.get('git_commit_hash')
+            if not worktree or not Path(worktree).is_dir() or not base or not commit:
+                raise ValueError('上一轮工作树或已验证提交缺失，无法在原基础上继续修复')
+            rounds = await rejected_rounds(db_path, bug['bug_id'])
+            if rounds >= MAX_AUTO_REPAIR_ROUNDS:
+                raise ValueError(f'已连续 {rounds} 轮验收未修复，停止自动修复；请人工介入')
+            await stop_preview(agent_id)
+            if config.get('repo_path'):
+                try:
+                    saved.update(await preserve_attempt(config['repo_path'], bug['bug_id'], f"{history['task_id']}-r{rounds + 1}", base, commit))
+                except (ValueError, OSError) as exc:
+                    saved['attempt_error'] = str(exc)
+            # 分支退回基础提交、改动留在工作区，验证阶段从同一基础重新生成提交。
+            await git(worktree, 'reset', '--mixed', '-q', base)
+            choice = {'confirmed': False, 'feedback': feedback, 'images': image_names, 'rework': 'fix', 'merge': None}
+            retry = (f'用户人工验收：认可根因与修复方案，但实现仍不到位，反馈如下：\n{feedback}\n'
+                     '上一轮修改仍保留在工作树中（未提交）。请在此基础上补全或修正，不要推翻已确认的根因与方案，也不要撤销已正确的改动；完成后照常提交修复。')
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute('BEGIN IMMEDIATE')
+                await db.execute("UPDATE decisions SET status='answered', user_choice=?, answered_at=CURRENT_TIMESTAMP WHERE decision_id=?", (json.dumps(choice, ensure_ascii=False), decision['decision_id']))
+                await db.execute("UPDATE agents SET status='busy', updated_at=CURRENT_TIMESTAMP WHERE agent_id=?", (agent_id,))
+                await db.execute("UPDATE bugs SET status='fixing', updated_at=CURRENT_TIMESTAMP WHERE bug_id=? AND assigned_agent_id=?", (bug['bug_id'], agent_id))
+                await db.execute("UPDATE task_history SET stage='fixing', status='running', result=?, error=NULL, end_time=NULL WHERE id=?", (json.dumps(saved, ensure_ascii=False), history['id']))
+                await db.execute("INSERT INTO agent_logs (agent_id, bug_id, log_level, message) VALUES (?, ?, 'info', ?)",
+                                 (agent_id, bug['bug_id'], f'用户验收反馈实现不到位，保留根因与方案，在原工作树继续修复（第 {rounds + 1} 轮）'))
+                await db.commit()
+        task = Task(task_id=history['task_id'], bug_id=bug['bug_id'], priority=0, created_at=datetime.now(), status='running',
+                    input_snapshot=saved.get('input_snapshot') or {})
+        state = {**saved, 'bug_id': task.bug_id, 'bug_info': {}, 'stage': 'fixing', 'git_commit_hash': None, 'test_results': {},
+                 'fix_summary': None, 'repair_summary': None, 'waiting_for_user': False, 'user_decision': choice, 'error': None,
+                 'failed_node': None, 'verify_rounds': 0, 'require_plan_confirmation': True, 'retry_context': retry}
+        self.agent_states[agent_id] = {'agent_id': agent_id, 'task': task, 'state': state, 'status': 'running', 'progress': 45}
+        task_handle = asyncio.create_task(self._resume_from(agent_id, task, state, 'implement_fix'))
+        self.running_agents[agent_id] = task_handle
+        task_handle.add_done_callback(lambda t: self._on_agent_complete(agent_id, t))
+        return {'agent_id': agent_id, 'status': 'fixing', 'round': rounds + 1}
 
     async def _resume_proposal(self, agent_id, task, state, reanalyze):
         await self._resume_from(agent_id, task, state, 'analyze_root_cause' if reanalyze else 'implement_fix')
@@ -627,8 +688,9 @@ class MultiAgentOrchestrator:
                     input_snapshot=saved.get('input_snapshot') or {'supplement': supplement})
         if start_node != 'fetch_bug':
             cleared = {
-                'analyze_root_cause': {'root_cause': None, 'analysis': None, 'repro': None, 'review': None, 'proposals': [], 'selected_proposal': None, 'modified_files': []},
-                'design_proposal': {'selected_proposal': None, 'modified_files': []},
+                'analyze_root_cause': {'root_cause': None, 'analysis': None, 'repro': None, 'review': None, 'proposals': [], 'selected_proposal': None, 'modified_files': [], 'fix_summary': None, 'repair_summary': None},
+                'design_proposal': {'selected_proposal': None, 'modified_files': [], 'fix_summary': None, 'repair_summary': None},
+                'implement_fix': {'fix_summary': None, 'repair_summary': None},
             }.get(start_node, {})
             previous_error = history['error'] or saved.get('error')
             task.resume_state = {

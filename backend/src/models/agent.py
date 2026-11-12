@@ -1,7 +1,9 @@
 """Agent 数据模型"""
 from pydantic import BaseModel, Field, StrictBool
-from typing import Optional
+from typing import Literal, Optional
 from datetime import datetime
+from ..core.acceptance import CriterionReview
+from ..core.repair_summary import RepairSummary
 
 
 class Agent(BaseModel):
@@ -35,9 +37,12 @@ class AgentStatus(BaseModel):
     repro: Optional[dict] = None
     review: Optional[dict] = None
     fix_summary: Optional[str] = None
+    repair_summary: Optional[RepairSummary] = None
     test_results: dict = Field(default_factory=dict)
     confirmation: Optional[dict] = None
     error: Optional[str] = None
+    acceptance: Optional[dict] = None
+    attention: Optional[dict] = None
 
 
 class RepairConfirmation(BaseModel):
@@ -46,6 +51,10 @@ class RepairConfirmation(BaseModel):
     images: list[str] = Field(default_factory=list, max_length=4)
     document: Optional[dict] = None
     git_commit_hash: Optional[str] = Field(default=None, pattern=r'^[0-9a-f]{40,64}$')
+    acceptance_version: Optional[str] = Field(default=None, max_length=80)
+    acceptance_results: Optional[list[CriterionReview]] = Field(default=None, max_length=100)
+    # 未通过时下一轮回到哪一步：analysis 重新分析根因；proposal 沿用根因只换方案。
+    rework: Optional[Literal['analysis', 'proposal']] = None
 
 
 class ProposalConfirmation(BaseModel):

@@ -7,6 +7,7 @@ import { AgentMascot, OfficeChair } from '../Shared/AgentMascot';
 import type { AgentLook } from '../../utils/agentLooks';
 import {
   DESK,
+  assignDesks,
   buildOfficeLayout,
   findPath,
   type OfficeLayout,
@@ -585,10 +586,17 @@ export const AgentOffice: React.FC<AgentOfficeProps> = ({ agents, isHighlighted,
     return () => observer.disconnect();
   }, []);
 
-  // 按名称固定工位顺序，轮询刷新时不会换座位
+  // 姓名序固定工位。排在工位数量之外但正在干活的人，换掉最后一名空闲同事，否则座位不存在，人会停在茶水间
   const sorted = useMemo(() => [...agents].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')), [agents]);
   const layout = useMemo(() => (width ? buildOfficeLayout(width, sorted.length) : null), [width, sorted.length]);
-  const deskOf = useMemo(() => new Map(sorted.map((agent, index) => [agent.agent_id, index])), [sorted]);
+  const deskOf = useMemo(
+    () =>
+      assignDesks(
+        sorted.map((agent) => ({ agent_id: agent.agent_id, idle: agentPose(agent) === 'idle' })),
+        layout?.desks.length ?? 0,
+      ),
+    [sorted, layout],
+  );
 
   /* 每个 Agent 要去的位置。空闲的人记住上次去的休息位，避免每次轮询都换地方 */
   const prefsRef = useRef(new Map<string, string>());
@@ -599,23 +607,34 @@ export const AgentOffice: React.FC<AgentOfficeProps> = ({ agents, isHighlighted,
     const taken = new Set<string>();
     const idle: AgentStatus[] = [];
     sorted.forEach((agent) => {
-      const desk = deskOf.get(agent.agent_id)!;
+      const desk = deskOf.get(agent.agent_id);
       const pose = agentPose(agent);
-      if (pose === 'idle') idle.push(agent);
-      else result.set(agent.agent_id, pose === 'waiting' ? `stand-${desk}` : `seat-${desk}`);
+      if (desk === undefined || pose === 'idle') {
+        idle.push(agent);
+        return;
+      }
+      const spot = pose === 'waiting' ? `stand-${desk}` : `seat-${desk}`;
+      result.set(agent.agent_id, spot);
+      taken.add(`seat-${desk}`);
+      taken.add(`stand-${desk}`);
     });
     const pending: AgentStatus[] = [];
     idle.forEach((agent) => {
       const pref = prefsRef.current.get(agent.agent_id);
-      const ownSeat = `seat-${deskOf.get(agent.agent_id)}`;
-      if (pref && (pref === ownSeat || layout.spots.get(pref)?.kind === 'lounge') && !taken.has(pref)) {
+      const desk = deskOf.get(agent.agent_id);
+      const ownSeat = desk === undefined ? undefined : `seat-${desk}`;
+      const prefSpot = pref ? layout.spots.get(pref) : undefined;
+      if (pref && prefSpot && (pref === ownSeat || prefSpot.kind === 'lounge') && !taken.has(pref)) {
         result.set(agent.agent_id, pref);
         taken.add(pref);
       } else pending.push(agent);
     });
     pending.forEach((agent) => {
-      const free = layout.loungeKeys.find((key) => !taken.has(key));
-      const spot = free || `seat-${deskOf.get(agent.agent_id)}`;
+      const lounge = layout.loungeKeys.find((key) => !taken.has(key));
+      const desk = deskOf.get(agent.agent_id);
+      const ownSeat = desk !== undefined && !taken.has(`seat-${desk}`) ? `seat-${desk}` : undefined;
+      const spot = lounge || ownSeat;
+      if (!spot) return;
       result.set(agent.agent_id, spot);
       taken.add(spot);
     });
@@ -648,8 +667,10 @@ export const AgentOffice: React.FC<AgentOfficeProps> = ({ agents, isHighlighted,
       const agent = idle[Math.floor(Math.random() * idle.length)];
       const taken = new Set(assigned.values());
       const options = current.loungeKeys.filter((key) => !taken.has(key));
-      const ownSeat = `seat-${desks.get(agent.agent_id)}`;
-      if (assigned.get(agent.agent_id) !== ownSeat && Math.random() < 0.2) options.push(ownSeat);
+      const deskIndex = desks.get(agent.agent_id);
+      const ownSeat = deskIndex === undefined ? undefined : `seat-${deskIndex}`;
+      if (ownSeat && !taken.has(ownSeat) && assigned.get(agent.agent_id) !== ownSeat && Math.random() < 0.2)
+        options.push(ownSeat);
       if (!options.length) return;
       prefsRef.current.set(agent.agent_id, options[Math.floor(Math.random() * options.length)]);
       setWander((n) => n + 1);
@@ -716,7 +737,7 @@ export const AgentOffice: React.FC<AgentOfficeProps> = ({ agents, isHighlighted,
               className="is-room"
             />
             {layout.desks.map((desk, index) => {
-              const owner = sorted[index];
+              const owner = sorted.find((agent) => deskOf.get(agent.agent_id) === index);
               const target = owner ? targets.get(owner.agent_id) : undefined;
               const spot = target ? layout.spots.get(target) : undefined;
               const atDesk = !!owner && (target === `seat-${index}` || target === `stand-${index}`);

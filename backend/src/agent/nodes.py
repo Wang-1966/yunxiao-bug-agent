@@ -425,6 +425,7 @@ async def implement_fix_node(state: BugFixState) -> Dict[str, Any]:
         return {
             'modified_files': files,
             'fix_summary': result['summary'],
+            'repair_summary': result.get('repair_summary'),
             'repro': result['repro'],
             'review': result['review'],
             'source_context': result['source_context'],
@@ -459,6 +460,10 @@ async def verify_fix_node(state: BugFixState) -> Dict[str, Any]:
         elapsed_time = time.time() - start_time
 
         if result['passed']:
+            from ..core.acceptance import acceptance_plan
+            analysis = state.get('analysis') or {}
+            plan = analysis.get('acceptance_plan') or acceptance_plan(analysis.get('symptom'))
+            result['acceptance_version'] = plan['version']
             logger.info(f"Verification passed, time={elapsed_time:.1f}s")
             await record_source_operation(
                 state,

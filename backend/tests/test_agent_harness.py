@@ -1,4 +1,4 @@
-"""原生工具循环：编辑容错、并行只读、复现必须失败、复现测试受保护、审查可打回。"""
+"""原生工具循环：编辑容错、并行只读、复现必须失败、复现测试受保护与证据来源。"""
 import subprocess
 import sys
 from pathlib import Path
@@ -43,9 +43,24 @@ def repository(tmp_path, monkeypatch):
     subprocess.run(['git', '-C', str(path), '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial'], check=True, capture_output=True)
     from src.config import get_settings
     settings = get_settings()
+    monkeypatch.setattr(settings, 'agent_engine', 'native')
     monkeypatch.setattr(settings, 'worktrees_dir', str(tmp_path / 'worktrees'))
     monkeypatch.setattr(settings, 'database_url', f'sqlite+aiosqlite:///{tmp_path / "tasks.db"}')
     return path
+
+
+@pytest.mark.asyncio
+async def test_submit_fix_preserves_brief_and_detailed_results_separately(repository):
+    from src.core.repair_agent import _fix_tool
+    (repository / 'app.py').write_text('value = 9\n')
+    holder = {}
+    tool = _fix_tool(Workspace(repository, mode='fix'), repository, {}, holder)
+    brief = {'root_cause': '初始值设置错误。', 'solution': '已修正初始值。'}
+    await tool.handler({'summary': '完整记录：app.py 修改；测试命令和限制。', 'repair_summary': brief})
+    assert holder['repair_summary'] == brief
+    assert holder['summary'].startswith('完整记录')
+    with pytest.raises(ToolError, match='修复摘要无效'):
+        await tool.handler({'summary': '记录', 'repair_summary': {**brief, 'solution': '长' * 181}})
 
 
 def test_edit_matches_confusable_quotes_and_reports_the_nearest_lines(repository):
@@ -114,6 +129,31 @@ async def test_analysis_requires_a_failing_reproduction_and_keeps_source_clean(r
 
 
 @pytest.mark.asyncio
+async def test_item_evidence_flows_from_analysis_through_real_verification_to_commit(repository):
+    from src.agent.nodes import verify_fix_node
+    from src.core.acceptance import evidence_report
+    from src.core.repair_executor import git
+    command = f'{sys.executable} -B test_repro.py'
+    llm = ScriptedLLM([
+        turn(('edit_file', {'path': 'test_repro.py', 'old_string': '', 'new_string': 'from app import value\nassert value == 2\n'})),
+        turn(analysis_args(reproduction={'command': command, 'test_files': ['test_repro.py']},
+                           acceptance_checks=[{'criterion_index': 0, 'method': 'reproduction', 'detail': '导入真实业务值并断言等于 2', 'test_files': ['test_repro.py']}]))])
+    analysis = await run_analysis(llm, None, repository, '调查', bug={'title': 'value 错误'})
+    base = await git(repository, 'rev-parse', 'HEAD')
+    (repository / 'app.py').write_text('value = 2\n')
+    state = {**analysis, 'worktree_path': str(repository), 'bug_id': 'one', 'bug_info': {'title': 'value 错误', 'test_command': command},
+             'repair_branch': 'main', 'base_commit': base}
+    verified = await verify_fix_node(state)
+    report = evidence_report({**state, **verified})
+    assert verified['stage'] == 'awaiting_confirmation'
+    assert report['current'] is True
+    assert report['criteria'][0]['automatic_status'] == 'passed'
+    assert report['git_commit_hash'] == await git(repository, 'rev-parse', 'HEAD')
+    assert report['reproduction_before']['exit_before'] != 0
+    assert next(item for item in report['checks'] if item['kind'] == 'reproduction')['exit_code'] == 0
+
+
+@pytest.mark.asyncio
 async def test_fix_protects_reproduction_test_and_reruns_it(repository):
     (repository / 'test_repro.py').write_text('raise SystemExit(1)\n')
     subprocess.run(['git', '-C', str(repository), 'add', 'test_repro.py'], check=True)
@@ -145,7 +185,7 @@ async def test_fix_protects_reproduction_test_and_reruns_it(repository):
 
 
 @pytest.mark.asyncio
-async def test_review_rejection_is_shown_to_the_implementer(repository):
+async def test_unused_reviewer_does_not_manufacture_review_evidence(repository):
     llm = ScriptedLLM([
         turn(analysis_args()),
         turn(analysis_args(root_cause='app.py:2 赋值为 1，缩进后无条件关栏')),
@@ -156,20 +196,23 @@ async def test_review_rejection_is_shown_to_the_implementer(repository):
     ])
     bug = {'title': '工具栏', 'description': '消失', 'feedback': '无', 'previous_attempt': '无'}
     result = await run_analysis(llm, reviewer, repository, '分析', bug=bug)
-    assert result['confidence'] == 'medium'  # 审查通过，但没有复现
-    feedback = llm.calls[1]['messages'][-1]['content']
-    assert 'dismiss' in feedback
+    assert result['confidence'] == 'medium'  # 没有自动复现；兼容参数不是实际审查。
+    assert result['review']['status'] == 'skipped'
+    assert len(llm.calls) == 1
+    assert reviewer.calls == []
 
 
 @pytest.mark.asyncio
-async def test_unresolved_review_lowers_confidence_instead_of_stopping(repository):
+async def test_no_reproduction_keeps_manual_acceptance_instead_of_claiming_low_review_confidence(repository):
     llm = ScriptedLLM([turn(analysis_args()), turn(analysis_args()), turn(analysis_args())])
     reviewer = ScriptedLLM([turn(review_refuted()), turn(review_refuted()), turn(review_refuted())])
     bug = {'title': '工具栏', 'description': '消失', 'feedback': '无', 'previous_attempt': '无'}
     result = await run_analysis(llm, reviewer, repository, '分析', bug=bug)
-    assert result['confidence'] == 'low'
-    assert result['review']['refuted'] is True
-    assert '审查员仍不认可' in result['root_cause']
+    assert result['confidence'] == 'medium'
+    assert result['review']['refuted'] is False
+    assert result['review']['status'] == 'skipped'
+    assert all(item['method'] == 'manual' for item in result['analysis']['acceptance_plan']['criteria'])
+    assert reviewer.calls == []
 
 
 @pytest.mark.asyncio

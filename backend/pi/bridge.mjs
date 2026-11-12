@@ -1,8 +1,11 @@
-/** Pi owns the agent loop and JSONL session; Python owns every tool and approval. */
+/** Pi owns coding tools and sessions; Python owns business permissions, evidence and approval. */
 import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { createAgentSession, createExtensionRuntime, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { randomUUID } from 'node:crypto';
+import { createAgentSession, DefaultResourceLoader, loadProjectContextFiles, loadSkills, ModelRuntime, SessionManager, SettingsManager,
+  createReadToolDefinition, createEditToolDefinition, createWriteToolDefinition, createBashToolDefinition,
+  createFindToolDefinition, createLsToolDefinition } from '@earendil-works/pi-coding-agent';
 import { compactionMetric, estimateInput } from './context-metrics.mjs';
 
 process.umask(0o077);
@@ -15,6 +18,65 @@ let turn = 0;
 let idle = 0;
 let error;
 let starting = false;
+let stopping = false;
+
+function shutdown() {
+  stopping = true;
+  // SDK dispose aborts tool signals and kills detached bash process groups.
+  session?.dispose();
+  for (const reply of replies.values()) reply({ error: 'Cancelled' });
+  replies.clear();
+  input.close();
+  process.stdin.destroy();
+}
+process.once('SIGTERM', shutdown);
+process.once('SIGHUP', shutdown);
+
+function request(value, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Cancelled'));
+    const id = value.id || randomUUID();
+    const cancel = () => { replies.delete(id); reject(new Error('Cancelled')); };
+    signal?.addEventListener('abort', cancel, { once: true });
+    replies.set(id, (result) => {
+      signal?.removeEventListener('abort', cancel);
+      if (result.error) reject(new Error(result.error));
+      else resolve(result);
+    });
+    send({ ...value, id });
+  });
+}
+
+const shellQuote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+
+function codingTools(config) {
+  const factories = { read: createReadToolDefinition, edit: createEditToolDefinition, write: createWriteToolDefinition,
+    bash: createBashToolDefinition, find: createFindToolDefinition, ls: createLsToolDefinition };
+  return config.nativeTools.map((name) => {
+    const options = name === 'bash' ? {
+      exposeSessionEnvironment: false,
+      spawnHook: ({ command, cwd }) => ({ cwd, env: config.commandEnv,
+        command: `exec sandbox-exec -p ${shellQuote(config.commandSandbox)} /bin/sh -c ${shellQuote(command)}` }),
+    } : undefined;
+    const tool = factories[name](config.cwd, options);
+    return { ...tool, executionMode: 'sequential', execute: async (id, args, signal, onUpdate, ctx) => {
+      if (submitted) throw new Error('当前阶段已经提交');
+      const permitted = await request({ type: 'native_start', callId: id, name, args }, signal);
+      let result;
+      try {
+        result = await tool.execute(id, permitted.args, signal, onUpdate, ctx);
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        result = { content: [{ type: 'text', text: String(err.message) }], isError: true };
+      }
+      if (config.apiKey) result = JSON.parse(JSON.stringify(result).replaceAll(config.apiKey, '[REDACTED]'));
+      const recorded = await request({ type: 'native_end', callId: id, result }, signal);
+      // Pi controls formatting/truncation. Keep images, diffs and structured results intact.
+      return { ...result, content: [...result.content, { type: 'text',
+        text: `[历史证据 ${recorded.evidenceId}；可用 read_evidence 回查，历史结果不代表当前版本]` }] };
+    } };
+  });
+}
 
 function images(urls = []) {
   return urls.map((url) => {
@@ -35,43 +97,40 @@ async function start(config) {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: config.contextWindow, maxTokens: config.maxTokens,
       compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false, maxTokensField: 'max_tokens' } }],
   });
-  const resources = {
-    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => config.system,
-    getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [],
-    getAppendSystemPromptSources: () => [],
-    extendResources: () => {}, reload: async () => {},
-  };
+  const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 3 }, compaction: {
+    enabled: true, reserveTokens: config.reserveTokens, keepRecentTokens: config.keepRecentTokens,
+  } });
+  const discovered = loadSkills({ cwd: config.cwd, agentDir: dirname(config.session),
+    skillPaths: config.skillPaths, includeDefaults: false });
+  const contextFiles = loadProjectContextFiles({ cwd: config.cwd, agentDir: dirname(config.session) });
+  const approved = await request({ type: 'resources', paths: [
+    ...discovered.skills.map((skill) => skill.filePath), ...contextFiles.map((file) => file.path),
+  ] });
+  const resources = new DefaultResourceLoader({
+    cwd: config.cwd, agentDir: dirname(config.session), settingsManager: settings,
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    systemPrompt: config.system,
+    agentsFilesOverride: () => ({ agentsFiles: contextFiles.filter((file) => approved.paths.includes(file.path)) }),
+    skillsOverride: () => ({ ...discovered, skills: discovered.skills.filter((skill) => approved.paths.includes(skill.filePath)) }),
+  });
+  await resources.reload();
   const customTools = config.tools.map(({ function: tool }) => ({
     name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters,
     executionMode: 'sequential',
     execute: async (id, args, signal) => {
       if (submitted) return { content: [{ type: 'text', text: '阶段已提交，本次调用未执行' }], details: {} };
-      const value = await new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error('Cancelled'));
-        const cancel = () => { replies.delete(id); reject(new Error('Cancelled')); };
-        signal?.addEventListener('abort', cancel, { once: true });
-        replies.set(id, (result) => { signal?.removeEventListener('abort', cancel); resolve(result); });
-        send({ type: 'tool', id, name: tool.name, args });
-      });
-      if (value.error) throw new Error(value.error);
+      const value = await request({ type: 'tool', id, name: tool.name, args }, signal);
       if (value.terminal) submitted = true;
       return { content: [{ type: 'text', text: value.text || '已执行' }, ...images(value.images)], details: {} };
     },
   }));
+  const allTools = [...codingTools(config), ...customTools];
   ({ session } = await createAgentSession({
     cwd: config.cwd, agentDir: dirname(config.session), modelRuntime: runtime,
     model: runtime.getModel('yunxiao', config.model), thinkingLevel: 'off',
-    resourceLoader: resources, tools: customTools.map((tool) => tool.name), customTools,
+    resourceLoader: resources, tools: allTools.map((tool) => tool.name), customTools: allTools,
     sessionManager: SessionManager.open(config.session, dirname(config.session), config.cwd),
-    settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 3 }, compaction: {
-      enabled: true, reserveTokens: config.reserveTokens, keepRecentTokens: config.keepRecentTokens,
-    } }),
+    settingsManager: settings,
   }));
   const streamModel = session.agent.streamFunction;
   let compactionStarted;
@@ -139,7 +198,7 @@ async function start(config) {
   });
   send({ type: 'ready' });
   await session.prompt(config.prompt);
-  while (!submitted && !error && turn < config.maxTurns && idle++ < 2) {
+  while (!stopping && !submitted && !error && turn < config.maxTurns && idle++ < 2) {
     await session.prompt('请继续调用工具完成当前阶段，完成后必须调用对应的 submit 工具。需要用户澄清时调用 ask_user。');
   }
   send({ type: 'done', submitted, error: submitted ? undefined : error || 'Pi 未提交阶段结果' });
@@ -169,4 +228,4 @@ input.on('line', (line) => {
     }
   } catch { send({ type: 'fatal', error: 'Invalid host protocol message' }); }
 });
-input.on('close', () => { session?.dispose(); });
+input.on('close', () => { stopping = true; session?.dispose(); });

@@ -11,7 +11,7 @@ from ..config import get_settings
 from .repair_executor import git, run_process, REPAIR_BRANCH_PREFIX
 
 
-async def merge_confirmed_repair(*, worktree_path: str, repair_branch: str, repo_path: str, target_branch: str, git_commit_hash: str, base_commit: str, resolver=None, test_command: str = ''):
+async def merge_confirmed_repair(*, worktree_path: str, repair_branch: str, repo_path: str, target_branch: str, git_commit_hash: str, base_commit: str, resolver=None, test_command: str = '', require_exact_commit: bool = False):
     repo = Path(repo_path).expanduser().resolve()
     worktree = Path(worktree_path).expanduser().resolve()
     if not repo.is_dir() or not worktree.is_dir():
@@ -53,6 +53,8 @@ async def merge_confirmed_repair(*, worktree_path: str, repair_branch: str, repo
         await _merge_commit(repo, message, git_commit_hash)
     except Exception as exc:
         await _abort_merge(repo)
+        if require_exact_commit:
+            raise ValueError('合并失败，已保留你验收的提交。请通过“仍未修复”退回修复，在目标分支最新代码上重新修复、验证并验收。') from exc
         try:
             original = git_commit_hash
             git_commit_hash = await _integrate_target(worktree, target_branch, resolver or resolve_merge_with_agent)

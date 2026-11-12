@@ -13,6 +13,7 @@ class BugFixState(TypedDict):
     repair_branch: Optional[str]
     base_commit: Optional[str]
     fix_summary: Optional[str]
+    repair_summary: Optional[Dict[str, str]]
     repair_feedback: Optional[str]
     previous_attempt: Optional[Dict[str, Any]]
     visual_context: Optional[Dict[str, Any]]

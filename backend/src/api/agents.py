@@ -21,6 +21,9 @@ from ..core.agent_stream import live_stream, tool_activity
 from ..core.projects import resolve_project_config, project_configuration_lock
 from ..core.preview_manager import start_preview, stop_preview, preview_status
 from ..core.tool_agent import repair_unicode_escapes
+from ..core.acceptance import evidence_report
+from ..core.attention import attention_item
+from ..core.repair_summary import repair_summary
 
 router = APIRouter(prefix="/api/agents", tags=["Agents"])
 settings = get_settings()
@@ -40,9 +43,26 @@ async def get_conversation(agent_id: str):
         for item in items:
             item['images'] = [f"/api/agents/{agent_id}/conversation/{item['id']}/images/{index}" for index in range(len(item['images']))]
         async with aiosqlite.connect(get_db_path()) as db:
-            row = await (await db.execute('SELECT a.status, b.assigned_agent_id FROM agents a JOIN bugs b ON a.current_bug_id=b.bug_id WHERE a.agent_id=?', (agent_id,))).fetchone()
+            row = await (await db.execute('''SELECT a.status, b.assigned_agent_id, b.status, h.result
+                FROM agents a JOIN bugs b ON a.current_bug_id=b.bug_id
+                LEFT JOIN task_history h ON h.id=(SELECT MAX(id) FROM task_history WHERE agent_id=a.agent_id)
+                WHERE a.agent_id=?''', (agent_id,))).fetchone()
+        saved = json.loads(row[3] or '{}') if row else {}
+        runtime = get_orchestrator().get_agent_status(agent_id) or {}
+        saved.update(runtime.get('state') or {})
+        summary = repair_summary(saved) if saved else None
+        outcome = None
+        if row:
+            if row[0] == 'awaiting_confirmation':
+                outcome = '修复完成，等待你的验收'
+            elif row[0] == 'error':
+                outcome = '本轮执行未完成，可继续对话处理'
+            elif row[0] == 'idle':
+                outcome = '修复已验收并交付' if row[2] == 'resolved' else '本轮执行已结束'
         return {'messages': items, 'discussing': agent_discussion.busy(agent_id), 'engine': engine(),
-                'status': row[0] if row else 'idle', 'can_send': bool(row and row[1] == agent_id)}
+                'status': row[0] if row else 'idle', 'can_send': bool(row and row[1] == agent_id),
+                'assigned_agent_id': row[1] if row else None,
+                'repair_summary': summary, 'outcome': outcome}
     except KeyError:
         raise HTTPException(404, 'Agent 不存在')
 
@@ -96,12 +116,17 @@ def require_discussion_idle(agent_id):
 @router.get("", response_model=List[AgentStatus])
 async def list_agents():
     """获取所有 Agent 状态"""
+    return await _read_agent_statuses()
+
+
+async def _read_agent_statuses(agent_id=None):
     try:
         db_path = get_db_path()
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM agents ORDER BY agent_id"
+                "SELECT * FROM agents WHERE agent_id=?" if agent_id else "SELECT * FROM agents ORDER BY agent_id",
+                (agent_id,) if agent_id else (),
             )
             rows = await cursor.fetchall()
 
@@ -168,6 +193,12 @@ async def list_agents():
                 confirmation = dict(decision) if decision else None
                 if confirmation:
                     confirmation['user_choice'] = json.loads(confirmation['user_choice']) if confirmation['user_choice'] else None
+                pending_cursor = await db.execute("SELECT decision_id, stage, question, status, created_at FROM decisions WHERE agent_id=? AND status='pending' ORDER BY id DESC", (agent_dict['agent_id'],))
+                pending_decisions = [dict(item) for item in await pending_cursor.fetchall()]
+                report = evidence_report(state)
+                if agent_id is None:
+                    # 列表仅需条目摘要，逐项命令输出在详情按需读取。
+                    report = {**report, 'checks': [], 'reproduction_before': None}
 
                 agents.append(AgentStatus(
                     agent_id=agent_dict["agent_id"],
@@ -188,9 +219,12 @@ async def list_agents():
                     repro=state.get('repro'),
                     review=state.get('review'),
                     fix_summary=state.get('fix_summary'),
+                    repair_summary=repair_summary(state),
                     test_results=state.get('test_results') or {},
                     error=state.get('error') or runtime.get('error'),
                     confirmation=confirmation,
+                    acceptance=report,
+                    attention=attention_item(agent_dict, current_bug, state, pending_decisions, confirmation),
                     stage_timings=stage_timings if stage_timings else None,
                 ))
 
@@ -205,7 +239,7 @@ async def list_agents():
 async def get_agent(agent_id: str):
     """获取 Agent 详情"""
     try:
-        agents = await list_agents()
+        agents = await _read_agent_statuses(agent_id)
         agent = next((a for a in agents if a.agent_id == agent_id), None)
 
         if not agent:
@@ -330,33 +364,11 @@ async def retry_agent(agent_id: str):
         raise HTTPException(status_code=503, detail=str(exc))
 
 
-async def _restart_rejected_repair(bug_id):
-    """反馈已落盘；自动启动失败或达到上限时只提示手动重新执行，不让验收提交失败。"""
-    from ..core.repair_attempts import MAX_AUTO_REPAIR_ROUNDS, rejected_rounds
-    rounds = await rejected_rounds(get_db_path(), bug_id)
-    if rounds >= MAX_AUTO_REPAIR_ROUNDS:
-        return {'started': False, 'reason': f'已连续 {rounds} 轮验收未修复，停止自动重新修复；请人工介入，或补充信息后手动重新执行'}
-    try:
-        task_id = await get_orchestrator().submit_task(bug_id, priority=5)
-    except (RuntimeError, ValueError) as exc:
-        return {'started': False, 'reason': f'自动重新修复未启动：{exc}；反馈已保存，可手动重新执行'}
-    return {'started': True, 'round': rounds + 1, 'task_id': task_id, 'agent_id': f'agent-{task_id}'}
-
-
 @router.post('/{agent_id}/confirmation')
 async def confirm_agent_repair(agent_id: str, request: RepairConfirmation):
-    from ..core.repair_review import confirm_repair
+    from ..core.repair_review import settle_repair
     try:
-        async with get_orchestrator()._agent_control_lock:
-            require_discussion_idle(agent_id)
-            result = await confirm_repair(get_db_path(), agent_id, request)
-        runtime = get_orchestrator().get_agent_status(agent_id)
-        if runtime:
-            runtime.update(status='completed' if request.confirmed else 'rejected', progress=100 if request.confirmed else 90)
-            runtime['state'].update(stage='completed' if request.confirmed else 'rejected', waiting_for_user=False)
-        if not request.confirmed:
-            result['restart'] = await _restart_rejected_repair(result['bug_id'])
-        return result
+        return await settle_repair(get_db_path(), get_orchestrator(), agent_id, request, before=lambda: require_discussion_idle(agent_id))
     except KeyError:
         raise HTTPException(status_code=404, detail='Agent 不存在')
     except ValueError as exc:

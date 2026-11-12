@@ -112,7 +112,7 @@ class ContextRun:
             file.flush()
             os.fsync(file.fileno())
 
-    def archive(self, text, *, tool, call_id='', args=None):
+    def archive(self, text, *, tool, call_id='', args=None, source_truncated=False):
         evidence_id = uuid.uuid4().hex
         secret = getattr(self.provider, 'api_key', '')
         if secret:
@@ -121,7 +121,7 @@ class ContextRun:
         upstream_truncated = '[命令输出超过保留上限' in text or '（输出过长已截断' in text
         record = dict(id=evidence_id, run_id=self.run_id, tool=tool, call_id=call_id,
                       at=datetime.now(timezone.utc).isoformat(), original_chars=original_chars,
-                      truncated=original_chars > MAX_EVIDENCE_CHARS or upstream_truncated,
+                      truncated=original_chars > MAX_EVIDENCE_CHARS or upstream_truncated or source_truncated,
                       content=clip_output(text, MAX_EVIDENCE_CHARS))
         if args:
             # Exact arguments stay with protected evidence, not in telemetry.
@@ -146,31 +146,37 @@ class ContextRun:
             text = text.replace(secret, '[REDACTED]')
         return clip_output(text, TOOL_PREVIEW_CHARS) + f'\n[历史证据 {evidence_id}；可用 read_evidence 回查，无需重执行操作]'
 
+    def begin_tool(self, name, call_id, args, *, readonly):
+        """宿主工具和 Pi 原生工具共用同一条证据链。"""
+        execution_id = uuid.uuid4().hex
+        args_hash = hashlib.sha256(json.dumps(args, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        self.emit('tool_start', execution_id=execution_id, call_id=call_id, tool=name, readonly=readonly, args_sha256=args_hash)
+        return dict(execution_id=execution_id, name=name, call_id=call_id, args=args, started=time.monotonic())
+
+    def end_tool(self, execution, text='', *, status='completed', error_type=None, source_truncated=False):
+        evidence_id = None if status == 'uncertain' else self.archive(
+            text, tool=execution['name'], call_id=execution['call_id'], args=execution['args'], source_truncated=source_truncated)
+        self.emit('tool_end', execution_id=execution['execution_id'], tool=execution['name'], status=status,
+                  evidence_id=evidence_id, duration_ms=round((time.monotonic() - execution['started']) * 1000),
+                  **({'error_type': error_type} if error_type else {}))
+        return evidence_id
+
     async def execute(self, tool, call_id, args):
         if tool.name == 'read_evidence':
             result = await tool.handler(args)
             self.emit('evidence_read', evidence_id=args.get('evidence_id'), returned_chars=len(result))
             return result
-        execution_id = uuid.uuid4().hex
-        started = time.monotonic()
-        args_hash = hashlib.sha256(json.dumps(args, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        self.emit('tool_start', execution_id=execution_id, call_id=call_id, tool=tool.name, readonly=tool.readonly, args_sha256=args_hash)
+        execution = self.begin_tool(tool.name, call_id, args, readonly=tool.readonly)
         try:
             value = await tool.handler(args)
         except asyncio.CancelledError:
-            self.emit('tool_end', execution_id=execution_id, tool=tool.name, status='uncertain',
-                      duration_ms=round((time.monotonic() - started) * 1000))
+            self.end_tool(execution, status='uncertain')
             raise
         except Exception as exc:
-            evidence_id = self.archive(str(exc), tool=tool.name, call_id=call_id, args=args)
-            self.emit('tool_end', execution_id=execution_id, tool=tool.name, status='failed',
-                      error_type=type(exc).__name__, evidence_id=evidence_id,
-                      duration_ms=round((time.monotonic() - started) * 1000))
+            self.end_tool(execution, str(exc), status='failed', error_type=type(exc).__name__)
             raise
         text = value.get('text', '') if isinstance(value, dict) and 'images' in value else str(value)
-        evidence_id = self.archive(text, tool=tool.name, call_id=call_id, args=args)
-        self.emit('tool_end', execution_id=execution_id, tool=tool.name, status='completed',
-                  evidence_id=evidence_id, duration_ms=round((time.monotonic() - started) * 1000))
+        evidence_id = self.end_tool(execution, text)
         if tool.terminal:
             return value
         if isinstance(value, dict) and 'images' in value:

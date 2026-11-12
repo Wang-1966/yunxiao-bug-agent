@@ -1,6 +1,6 @@
 import React from 'react';
-import { Layout, Menu, Segmented, Tooltip } from 'antd';
-import { Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { Breadcrumb, Layout, Menu, Segmented, Tooltip } from 'antd';
+import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
   DashboardOutlined,
   BugOutlined,
@@ -89,16 +89,16 @@ const AppLayout: React.FC = () => {
       </Sider>
 
       <Layout className="app-main">
-        <Header className="app-topbar">
-          <div className="topbar-location">
-            <span>工作空间</span>
-            <span>/</span>
-            <strong>
-              {isWorkspace ? '修复工作台' : location.pathname.startsWith('/bugs/')
-                ? 'Bug 详情与补充'
-                : menuItems.find((item) => item.key === activePath)?.label}
-            </strong>
-          </div>
+        {!isWorkspace && <Header className="app-topbar">
+          <Breadcrumb
+            className="topbar-location"
+            items={[
+              { title: <Link to="/">工作空间</Link> },
+              ...(location.pathname.startsWith('/bugs/')
+                ? [{ title: <Link to="/bugs">Bug 悬赏榜</Link> }, { title: 'Bug 详情与补充' }]
+                : [{ title: menuItems.find((item) => item.key === activePath)?.label }]),
+            ]}
+          />
 
           <div className="topbar-right">
             <Tooltip title={`当前风格：${currentTheme.tagline}`}>
@@ -116,7 +116,7 @@ const AppLayout: React.FC = () => {
               </div>
             </Tooltip>
           </div>
-        </Header>
+        </Header>}
 
         <Content className={`app-content${isWorkspace ? ' workspace-content' : ''}`} id="main-content" tabIndex={-1}>
           <div className="app-content-inner">

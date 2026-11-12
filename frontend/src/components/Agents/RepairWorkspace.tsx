@@ -63,6 +63,7 @@ function Workspace({ agentId }: { agentId: string }) {
       {agent?.status === 'error' && (!newerAgent || newerAgent === agentId) && <Button loading={retrying} onClick={() => void retry()}>继续修复</Button>}
     </header>
     {error && <Alert type="error" message={error} />}
+    {agent?.attention?.kind === 'question' && <Alert type="warning" showIcon message="Agent 正在等待你的回答" description={agent.attention.summary} />}
     {newerAgent && newerAgent !== agentId && <Alert type="info" message={<span>该 Bug 已有新一轮修复。<Link to={`/agents/${encodeURIComponent(newerAgent)}`}>进入最新会话</Link></span>} />}
     {!agent ? <div className="repair-loading">{!error && <Spin tip="正在加载修复任务"><div style={{ height: 80 }} /></Spin>}</div> : <div className="repair-workspace-body">
       <main className="repair-chat-pane" aria-label="修复对话"><AgentTranscript agentId={agentId} active={agent.status === 'busy'} stage={agent.current_stage} bug={agent.current_bug} /></main>

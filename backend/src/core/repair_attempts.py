@@ -90,8 +90,16 @@ async def latest_rejected_attempt(db_path, bug_id):
         'diff_stat': saved.get('diff_stat') or '',
         'evidence_reads': [item for item in reads if isinstance(item, dict)][-MAX_EVIDENCE_READS:],
         'feedback': choice.get('feedback') or '',
+        'acceptance': choice.get('acceptance'),
         'image_count': len(choice.get('images') or []),
+        'rework': choice.get('rework'),
     }
+
+
+REWORK_REQUIREMENTS = {
+    'analysis': '要求：用户明确指出上一轮根因不对。必须从症状重新建立假设并取证，不得沿用上一轮根因结论；先说明上一轮根因为什么不成立，再给出新的根因与方案。',
+    'proposal': '要求：用户认可上一轮根因，但要求更换或优化修复方案。根因可沿用（仍需对照当前源码确认依据），重点给出与上一轮不同、能解决用户反馈问题的方案，并说明与上一轮方案的差别。',
+}
 
 
 def attempt_prompt(attempt):
@@ -112,6 +120,11 @@ def attempt_prompt(attempt):
         f"- 用户验收反馈：{attempt.get('feedback') or '（见反馈截图）'}" + (f"（附 {attempt['image_count']} 张截图，在用户反馈截图中）" if attempt.get('image_count') else ''),
         '- 上一轮改动统计（代码已丢弃，当前工作树基于目标分支最新代码）：',
         attempt.get('diff_stat') or '（无）',
-        '要求：先结合源码与验收反馈说明上一轮为什么没有修好，再给出结论；不得原样重复上一轮方案；若仍认为根因相同，必须指出上一轮遗漏或不完整之处。',
+        REWORK_REQUIREMENTS.get(attempt.get('rework'), '要求：先结合源码与验收反馈说明上一轮为什么没有修好，再给出结论；不得原样重复上一轮方案；若仍认为根因相同，必须指出上一轮遗漏或不完整之处。'),
     ]
+    criteria = (attempt.get('acceptance') or {}).get('criteria') or []
+    if criteria:
+        lines.insert(-1, '逐项人工验收：\n' + '\n'.join(
+            f"- [{'通过' if item.get('status') == 'passed' else '未通过'}] {item.get('text', '')}" +
+            (f"；反馈：{item['feedback']}" if item.get('feedback') else '') for item in criteria)[:4000])
     return '\n'.join(lines)

@@ -21,15 +21,6 @@ function formatDuration(seconds: number | undefined): string {
   return secs > 0 ? `${minutes}分${secs}秒` : `${minutes}分`;
 }
 
-function getStageLabel(stage: string): string {
-  const labels: Record<string, string> = {
-    analyze: '分析',
-    fix: '修复',
-    verify: '验证',
-  };
-  return labels[stage] || stage;
-}
-
 export const StageTimings: React.FC<StageTimingsProps> = ({
   timings,
   currentStage,

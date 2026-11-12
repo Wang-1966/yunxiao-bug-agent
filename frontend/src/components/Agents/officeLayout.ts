@@ -231,6 +231,34 @@ export function buildOfficeLayout(containerWidth: number, agentCount: number): O
   };
 }
 
+export interface DeskCandidate {
+  agent_id: string;
+  idle: boolean;
+}
+
+/**
+ * 传入顺序（姓名序）的前 deskCount 人占住工位。
+ * 排在后面但正在干活的人换掉最后一名空闲占座者，否则目标座位不在图上，人会停在休息区。
+ * ponytail: 同时干活的人数超过工位数时，多出来的人没有工位。要再加人就提高上面的 MAX_DESKS。
+ */
+export function assignDesks(agents: DeskCandidate[], deskCount: number): Map<string, number> {
+  const owners = agents.slice(0, Math.max(0, deskCount)).map((agent) => agent.agent_id);
+  const isIdle = (id: string) => agents.find((agent) => agent.agent_id === id)?.idle;
+  for (const agent of agents.slice(owners.length)) {
+    if (agent.idle) continue;
+    let slot = -1;
+    for (let i = owners.length - 1; i >= 0; i--) {
+      if (isIdle(owners[i])) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot < 0) break;
+    owners[slot] = agent.agent_id;
+  }
+  return new Map(owners.map((id, index) => [id, index]));
+}
+
 /** 图上最短路（节点数 < 100，直接 O(n²) Dijkstra） */
 export function findPath(graph: Graph, from: string, to: string): PathPoint[] {
   if (!graph.has(from) || !graph.has(to)) return [];
@@ -267,3 +295,31 @@ export function findPath(graph: Graph, from: string, to: string): PathPoint[] {
   }
   return path;
 }
+
+function checkAssignDesks() {
+  const agents: DeskCandidate[] = [
+    { agent_id: '爱', idle: true },
+    { agent_id: '戴', idle: true },
+    { agent_id: '断', idle: true },
+    { agent_id: '咖', idle: true },
+    { agent_id: '零', idle: true },
+    { agent_id: '日', idle: true },
+    { agent_id: '通', idle: true },
+    { agent_id: '修B', idle: true },
+    { agent_id: '修E', idle: false },
+    { agent_id: '修F', idle: true },
+    { agent_id: '夜', idle: true },
+  ];
+  const desks = assignDesks(agents, 6);
+  if (desks.get('修E') !== 5 || desks.has('日') || desks.get('零') !== 4)
+    throw new Error(`assignDesks ${JSON.stringify([...desks])}`);
+  const full = assignDesks(agents.map((agent) => ({ ...agent, idle: false })), 6);
+  if (full.has('修E') || full.get('日') !== 5) throw new Error('six busy agents keep the name-order desks');
+  const layout = buildOfficeLayout(1200, agents.length);
+  if (findPath(layout.graph, 'pantry-2', `stand-${desks.get('修E')}`).length < 2)
+    throw new Error('no path from the pantry to the borrowed desk');
+  console.log('assignDesks ok');
+}
+
+const entry = (globalThis as { process?: { argv?: string[] } }).process?.argv?.[1];
+if (entry?.endsWith('officeLayout.ts')) checkAssignDesks();

@@ -8,9 +8,38 @@ from .rich_input import save_rich_input
 from .repair_attempts import drop_attempt_refs, feedback_window_start, preserve_attempt
 from .preview_manager import stop_preview
 from .repair_status_sync import sync_confirmed_bug_status
+from .acceptance import validate_criterion_reviews
 
 # ponytail: 单进程串行交付，跨进程部署需仓库级外部锁。
 _delivery_lock = asyncio.Lock()
+
+
+async def settle_repair(db_path, runner, agent_id, confirmation, *, before=None):
+    """按钮与对话共用：交付或驳回，驳回后自动开始下一轮。before 在控制锁内执行额外校验。"""
+    async with runner._agent_control_lock:
+        if before:
+            before()
+        result = await confirm_repair(db_path, agent_id, confirmation)
+    runtime = runner.get_agent_status(agent_id)
+    if runtime:
+        runtime.update(status='completed' if confirmation.confirmed else 'rejected', progress=100 if confirmation.confirmed else 90)
+        runtime['state'].update(stage='completed' if confirmation.confirmed else 'rejected', waiting_for_user=False)
+    if not confirmation.confirmed:
+        result['restart'] = await restart_rejected_repair(db_path, runner, result['bug_id'])
+    return result
+
+
+async def restart_rejected_repair(db_path, runner, bug_id):
+    """反馈已落盘；自动启动失败或达到上限时只提示手动重新执行，不让验收提交失败。"""
+    from .repair_attempts import MAX_AUTO_REPAIR_ROUNDS, rejected_rounds
+    rounds = await rejected_rounds(db_path, bug_id)
+    if rounds >= MAX_AUTO_REPAIR_ROUNDS:
+        return {'started': False, 'reason': f'已连续 {rounds} 轮验收未修复，停止自动重新修复；请人工介入，或补充信息后手动重新执行'}
+    try:
+        task_id = await runner.submit_task(bug_id, priority=5)
+    except (RuntimeError, ValueError) as exc:
+        return {'started': False, 'reason': f'自动重新修复未启动：{exc}；反馈已保存，可手动重新执行'}
+    return {'started': True, 'round': rounds + 1, 'task_id': task_id, 'agent_id': f'agent-{task_id}'}
 
 
 async def confirm_repair(db_path, agent_id, confirmation):
@@ -23,8 +52,6 @@ async def confirm_repair(db_path, agent_id, confirmation):
 
 async def _confirm_repair(db_path, agent_id, confirmation):
     feedback, images, document = save_rich_input(db_path, confirmation.feedback, confirmation.images, confirmation.document, max_length=4000)
-    if not confirmation.confirmed and not feedback and not images:
-        raise ValueError('请填写仍未修复的现象或复现步骤（可粘贴截图），供下一次修复使用')
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute('BEGIN IMMEDIATE')
@@ -43,9 +70,17 @@ async def _confirm_repair(db_path, agent_id, confirmation):
         cleanup_retry = bool(confirmation.confirmed and decision and decision['status'] == 'answered' and previous.get('confirmed') and previous.get('merge', {}).get('cleanup_pending'))
         if cleanup_retry:
             delivery = saved['delivery']
+            acceptance = previous.get('acceptance')
         else:
             if not decision or decision['status'] != 'pending' or agent['status'] != 'awaiting_confirmation' or not bug or bug['assigned_agent_id'] != agent_id or bug['status'] != 'awaiting_confirmation':
                 raise ValueError('该修复结果已处理或不是当前待确认任务，请刷新页面')
+            acceptance = validate_criterion_reviews(saved, confirmation)
+            if not confirmation.confirmed and acceptance:
+                failed = [item for item in acceptance['criteria'] if item['status'] == 'failed']
+                item_feedback = '\n'.join(f"未通过：{item['text']}" + (f"；{item['feedback']}" if item['feedback'] else '') for item in failed)
+                feedback = '\n\n'.join(filter(None, [feedback, item_feedback]))[:4000]
+            if not confirmation.confirmed and not feedback and not images:
+                raise ValueError('请标记未通过的条目或填写仍未修复的现象（可粘贴截图），供下一次修复使用')
             delivery = saved.get('delivery')
             if confirmation.confirmed:
                 commit = saved.get('git_commit_hash')
@@ -61,6 +96,8 @@ async def _confirm_repair(db_path, agent_id, confirmation):
                                 'repo_path': config['repo_path'], 'target_branch': config['branch'],
                                 'git_commit_hash': commit, 'base_commit': saved['base_commit'],
                                 'test_command': config.get('test_command') or ''}
+                if acceptance:
+                    delivery['require_exact_commit'] = True
                 if delivery['repo_path'] != config['repo_path'] or delivery['target_branch'] != config['branch']:
                     raise ValueError('交付目标配置已变化，请恢复原配置后重试')
                 saved['delivery'] = delivery
@@ -83,6 +120,10 @@ async def _confirm_repair(db_path, agent_id, confirmation):
                 except (ValueError, OSError) as exc:
                     saved['attempt_error'] = str(exc)
             choice = {'confirmed': confirmation.confirmed, 'feedback': feedback, 'images': images, 'merge': merged}
+            if not confirmation.confirmed and confirmation.rework:
+                choice['rework'] = confirmation.rework
+            if acceptance is not None:
+                choice['acceptance'] = acceptance
             if yunxiao_sync:
                 choice['yunxiao_sync'] = yunxiao_sync
             if document is not None:
@@ -130,6 +171,8 @@ async def _confirm_repair(db_path, agent_id, confirmation):
         saved.update(merge=merged, stage='completed')
         choice = {**previous} if cleanup_retry else {'feedback': feedback, 'images': images}
         choice.update(confirmed=True, merge=merged)
+        if acceptance is not None:
+            choice['acceptance'] = acceptance
         if yunxiao_sync:
             choice['yunxiao_sync'] = yunxiao_sync
         if not cleanup_retry and document is not None:

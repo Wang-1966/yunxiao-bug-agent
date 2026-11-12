@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
+import { useNavigate } from 'react-router-dom';
 import {
   Alert,
   Button,
@@ -10,8 +11,6 @@ import {
   Radio,
   Skeleton,
   Space,
-  Tabs,
-  Timeline,
   message,
 } from 'antd';
 import { agentService } from '../../services/agentService';
@@ -22,23 +21,20 @@ import { AgentAvatar, resolveAgentPersona } from '../Shared/AgentAvatar';
 import { QuestPipeline } from '../Shared/QuestPipeline';
 import RepairPreview from './RepairPreview';
 import AnalysisDecisions from './AnalysisDecisions';
+import RepairSummary from './RepairSummary';
+import useReviewDraft from './useReviewDraft';
 
 interface Props {
   agentId: string | null;
   onClose: () => void;
   onConfirmed: () => void;
+  /** 验收不通过时去对话里反馈；默认跳转到该任务的对话页。 */
+  onFeedback?: () => void;
 }
 
 function errorText(error: unknown, fallback: string) {
   const detail = axios.isAxiosError(error) ? error.response?.data?.detail : undefined;
   return typeof detail === 'string' ? detail : fallback;
-}
-
-function confidenceLabel(confidence?: string) {
-  if (confidence === 'high') return '已复现且审查通过';
-  if (confidence === 'medium') return '部分证实';
-  if (confidence === 'low') return '审查未通过';
-  return '';
 }
 
 function AnalysisReportView({
@@ -54,7 +50,7 @@ function AnalysisReportView({
 }) {
   const symptom = analysis?.symptom;
   if (!symptom) return null;
-  const label = confidenceLabel(confidence);
+  const label = repro?.reproduced ? '已自动复现' : '未自动复现';
   const questions = analysis?.open_questions || [];
   const details = (
     <>
@@ -115,22 +111,25 @@ function AnalysisReportView({
   );
 }
 
-export default function RepairReview({ agentId, onClose, onConfirmed }: Props) {
+export default function RepairReview({ agentId, onClose, onConfirmed, onFeedback }: Props) {
   return agentId ? (
-    <ReviewContent key={agentId} agentId={agentId} onClose={onClose} onConfirmed={onConfirmed} />
+    <ReviewContent key={agentId} agentId={agentId} onClose={onClose} onConfirmed={onConfirmed} onFeedback={onFeedback} />
   ) : null;
 }
 
-function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: string }) {
+function ReviewContent({ agentId, onClose, onConfirmed, onFeedback }: Props & { agentId: string }) {
+  const navigate = useNavigate();
   const [agent, setAgent] = useState<AgentStatus | null>(null);
   const [error, setError] = useState('');
-  const [diff, setDiff] = useState<{ diff: string; truncated: boolean } | null>(null);
-  const [diffError, setDiffError] = useState('');
-  const [feedback, setFeedback] = useState<RichInputValue>({ text: '', images: [] });
   const [reading, setReading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [proposal, setProposal] = useState<any>(null);
   const [proposalIndex, setProposalIndex] = useState(0);
+  const decisionId = agent?.status === 'awaiting_plan_confirmation' ? proposal?.decision_id : agent?.confirmation?.decision_id;
+  const draftVersion = agent && decisionId ? `${decisionId}:${agent.git_commit_hash || 'analysis'}:${agent.acceptance?.version || ''}` : undefined;
+  const draft = useReviewDraft(agentId, draftVersion);
+  const feedback = draft.value.feedback;
+  const setFeedback = (value: RichInputValue) => draft.change((prior) => ({ ...prior, feedback: value }));
 
   useEffect(() => {
     if (!agentId) return;
@@ -152,14 +151,6 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
         }
         if (result.status === 'busy' || result.status === 'awaiting_plan_confirmation')
           timer = setTimeout(load, 3000);
-        else if (result.worktree_path) {
-          try {
-            const resultDiff = await agentService.diff(agentId);
-            if (active) setDiff(resultDiff);
-          } catch (err) {
-            if (active) setDiffError(errorText(err, '读取代码差异失败'));
-          }
-        }
       } catch (err) {
         if (active) setError(errorText(err, '加载修复结果失败'));
       }
@@ -185,33 +176,26 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
   const yunxiaoSync = agent?.confirmation?.user_choice?.yunxiao_sync;
 
   const hasFeedback = !!feedback.text.trim() || feedback.images.length > 0;
+  const formDisabled = saving || reading || !draft.ready;
 
-  const confirm = async (confirmed: boolean) => {
+  const giveFeedback = () => {
+    onClose();
+    if (onFeedback) onFeedback();
+    else navigate(`/agents/${encodeURIComponent(agentId)}#reply`);
+  };
+
+  const accept = async () => {
     if (!agentId || saving || reading) return;
-    if (!confirmed && !hasFeedback) {
-      message.warning('请填写仍未修复的现象或复现步骤，或粘贴截图');
-      return;
-    }
     setSaving(true);
     try {
-      const result = await agentService.confirm(
-        agentId,
-        confirmed,
-        feedback.text,
-        agent?.git_commit_hash,
-        feedback.images,
-        feedback.document,
-      );
+      const result = await agentService.confirm(agentId, true, '', agent?.git_commit_hash, []);
       if (result.merge?.cleanup_pending) message.warning(result.message);
-      else if (confirmed)
+      else
         message.success(
           result.yunxiao_sync?.status === 'succeeded'
             ? '修复提交已合并，云效 Bug 已更新为处理中'
             : '修复提交已合并，本地 Bug 已标记为已解决',
         );
-      else if (result.restart?.started)
-        message.success(`已记录反馈，Agent 已开始第 ${result.restart.round} 轮修复`);
-      else message.warning(result.restart?.reason || '已记录未修复反馈，可以手动重新执行', 6);
       if (result.yunxiao_sync?.status === 'failed')
         message.warning(
           `代码已交付，云效状态同步失败：${result.yunxiao_sync.error}。可重新打开验收详情重试同步。`,
@@ -238,6 +222,7 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
         feedback.images,
         feedback.document,
       );
+      await draft.clear();
       message.success(
         hasFeedback
           ? '反馈已提交，Agent 将重新分析并生成方案，等待你再次确认'
@@ -299,8 +284,9 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
       open={!!agentId}
       onCancel={saving || reading ? undefined : onClose}
       width={980}
+      style={{ top: 24 }}
       destroyOnClose
-      styles={{ body: { maxHeight: 'calc(100vh - 240px)', overflowY: 'auto' } }}
+      styles={{ body: { maxHeight: 'calc(100vh - 180px)', overflowY: 'auto' } }}
       footer={
         <Space wrap>
           <Button onClick={onClose} disabled={saving || reading}>
@@ -308,21 +294,16 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
           </Button>
           {canConfirm && (
             <>
-              <Button danger disabled={saving || reading} onClick={() => void confirm(false)}>
-                仍未修复
+              <Button danger disabled={saving} onClick={giveFeedback}>
+                不通过，去对话反馈
               </Button>
-              <Button
-                type="primary"
-                loading={saving}
-                disabled={reading}
-                onClick={() => void confirm(true)}
-              >
-                确认并合并到修复分支
+              <Button type="primary" loading={saving} disabled={saving} onClick={() => void accept()}>
+                通过并合并
               </Button>
             </>
           )}
           {canRetryCleanup && (
-            <Button loading={saving} disabled={reading} onClick={() => void confirm(true)}>
+            <Button loading={saving} disabled={reading} onClick={() => void accept()}>
               重试清理工作树
             </Button>
           )}
@@ -333,13 +314,13 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
           )}
           {needsAnswer && (
             <>
-              <Button loading={saving} disabled={reading || hasFeedback} onClick={() => void confirmProposal()}>
+              <Button loading={saving} disabled={formDisabled || hasFeedback} onClick={() => void confirmProposal()}>
                 先不回答，按暂定方案修复
               </Button>
               <Button
                 type="primary"
                 loading={saving}
-                disabled={reading || !hasFeedback}
+                disabled={formDisabled || !hasFeedback}
                 onClick={() => void confirmProposal()}
               >
                 提交回答并重新分析
@@ -350,7 +331,7 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
             <Button
               type="primary"
               loading={saving}
-              disabled={reading}
+              disabled={formDisabled}
               onClick={() => void confirmProposal()}
             >
               {hasFeedback ? '提交反馈并重新分析' : '确认方案并开始修复'}
@@ -373,7 +354,7 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
                 status={agent.status}
                 stage={agent.current_stage}
                 size="md"
-                showBubble
+                showBubble={!canConfirm}
               />
               <div className="workstation-meta">
                 <div className="workstation-name-row">
@@ -391,11 +372,11 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
             </div>
           </div>
 
-          <QuestPipeline
+          {!canConfirm && <QuestPipeline
             status={agent.status}
             stage={agent.current_stage}
             progress={agent.progress}
-          />
+          />}
 
           {agent.status === 'busy' && (
             <>
@@ -407,15 +388,19 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
               <Progress percent={agent.progress} />
             </>
           )}
-          {canConfirm && (
-            <Alert
-              type="warning"
-              showIcon
-              message="自动验证通过，等待你验收"
-              description={`确认后将合并到 ${agent.current_bug?.branch || '项目修复分支'}，并清理 Agent 分支和工作树。${agent.current_bug?.source === 'yunxiao' ? '代码交付成功后，将云效 Bug 状态更新为处理中。' : ''}`}
-            />
+          {!canConfirmProposal && (
+            <div className="acceptance-brief">
+              <RepairSummary summary={agent.repair_summary} />
+            </div>
           )}
           {canConfirm && <RepairPreview agentId={agentId} disabled={saving} />}
+          {canConfirm && (
+            <p className="evidence-explanation">
+              {`通过后将合并到 ${agent.current_bug?.branch || '项目修复分支'}，并清理 Agent 分支和工作树${agent.current_bug?.source === 'yunxiao' ? '，云效 Bug 更新为处理中' : ''}。不通过请在对话里直接说明问题，Agent 会判断是继续修复、更换方案还是重新分析根因。`}
+            </p>
+          )}
+          {canConfirmProposal && draft.stale && <Alert style={{ marginTop: 12 }} type="warning" showIcon message="方案已更新，旧草稿未套用。" />}
+          {canConfirmProposal && draft.memoryOnly && <Alert style={{ marginTop: 12 }} type="warning" showIcon message="浏览器暂时无法持久保存草稿；关闭面板后仍可恢复，刷新页面可能丢失。" />}
           {canConfirmProposal && (
             <>
               <Alert
@@ -543,110 +528,27 @@ function ReviewContent({ agentId, onClose, onConfirmed }: Props & { agentId: str
               }
             />
           )}
-          {!canConfirmProposal && (
-          <Descriptions
-            column={1}
-            style={{ marginTop: 16 }}
-            items={[
-              { key: 'summary', label: '修复说明', children: agent.fix_summary || '等待 Agent 生成' },
-              {
-                key: 'cause',
-                label: '根因',
-                children: agent.analysis?.symptom ? (
-                  <AnalysisReportView analysis={agent.analysis} repro={agent.repro} review={agent.review} confidence={agent.confidence} />
-                ) : (
-                  agent.root_cause || '-'
-                ),
-              },
-              { key: 'path', label: '修复工作树', children: agent.worktree_path || '-' },
-              { key: 'branch', label: 'Agent 修复分支', children: agent.repair_branch || '-' },
-              { key: 'commit', label: '已验证提交', children: agent.git_commit_hash || '尚未生成' },
-              { key: 'targetBranch', label: '合并目标分支', children: agent.current_bug?.branch || '-' },
-              { key: 'files', label: '修改文件', children: agent.modified_files?.join('、') || '-' },
-              { key: 'command', label: '验证命令', children: agent.test_results?.command || '-' },
-              {
-                key: 'result',
-                label: '验证结果',
-                children:
-                  agent.test_results?.passed === true
-                    ? '通过（退出码 0）'
-                    : agent.test_results?.passed === false
-                      ? `失败（退出码 ${agent.test_results.exit_code}）`
-                      : '尚未完成',
-              },
-            ]}
-          />
-          )}
-          {!canConfirmProposal && (
-          <Tabs
-            items={[
-              {
-                key: 'diff',
-                label: '代码差异',
-                children: diffError ? (
-                  <Alert type="warning" message={diffError} showIcon />
-                ) : diff ? (
-                  <>
-                    {diff.truncated && (
-                      <Alert
-                        type="warning"
-                        message="差异超过展示上限，请在工作树查看完整 Git diff"
-                      />
-                    )}
-                    <pre className="repair-output">{diff.diff || '未产生代码差异'}</pre>
-                  </>
-                ) : (
-                  <p>任务完成后展示代码差异。</p>
-                ),
-              },
-              {
-                key: 'verification',
-                label: '验证输出',
-                children: (
-                  <pre className="repair-output">
-                    {agent.test_results?.output || '暂无验证输出'}
-                  </pre>
-                ),
-              },
-              {
-                key: 'logs',
-                label: '任务日志',
-                children: <Timeline items={agent.logs.map((log) => ({ children: log }))} />,
-              },
-            ]}
-          />
-          )}
-          {(canConfirm || canConfirmProposal) && (
+          {canConfirmProposal && (
             <div>
-              <label htmlFor="repair-feedback">
+              <label htmlFor="repair-feedback">{needsAnswer ? '回答待确认' : '补充或纠正问题理解'}</label>
+              <p className="proposal-feedback-note">
                 {needsAnswer
-                  ? '回答待确认'
-                  : canConfirmProposal
-                    ? '补充或纠正问题理解'
-                    : '验收反馈（选择“仍未修复”时必填，可直接粘贴截图）'}
-              </label>
-              {canConfirmProposal && (
-                <p className="proposal-feedback-note">
-                  {needsAnswer
-                    ? '请直接回答上面的待确认。提交后重新分析，再给你确认方案；留空不能开始改代码。'
-                    : hasFeedback
-                      ? '框里已有内容。提交后会重新分析并生成新方案，再次等你确认，不会直接改代码。'
-                      : '框里留空再确认，会按当前方案直接改代码。'}
-                </p>
-              )}
+                  ? '请直接回答上面的待确认。提交后重新分析，再给你确认方案；留空不能开始改代码。'
+                  : hasFeedback
+                    ? '框里已有内容。提交后会重新分析并生成新方案，再次等你确认，不会直接改代码。'
+                    : '框里留空再确认，会按当前方案直接改代码。'}
+              </p>
               <RichInput
                 id="repair-feedback"
                 value={feedback}
                 onChange={setFeedback}
-                disabled={saving}
+                disabled={saving || !draft.ready}
                 onBusyChange={setReading}
                 maxLength={4000}
                 placeholder={
                   needsAnswer
                     ? '逐条回答上面的待确认…'
-                    : canConfirmProposal
-                      ? '指出理解偏差、补充复现步骤或修复要求，截图直接粘贴在这里…'
-                      : '描述仍存在的现象或验收结果，截图直接粘贴在这里…'
+                    : '指出理解偏差、补充复现步骤或修复要求，截图直接粘贴在这里…'
                 }
               />
             </div>

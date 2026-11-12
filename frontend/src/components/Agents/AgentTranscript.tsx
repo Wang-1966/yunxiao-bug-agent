@@ -4,13 +4,14 @@ import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import RichInput from '../Shared/RichInput';
 import RepairReview from './RepairReview';
+import RepairSummary from './RepairSummary';
 import BugInputMessage from './BugInputMessage';
 import AnalysisDecisions from './AnalysisDecisions';
 import { ArrowDownOutlined, ArrowUpOutlined, BulbOutlined, CloseCircleOutlined, CodeOutlined, ExclamationCircleOutlined, LoadingOutlined, RightOutlined, RobotOutlined, StopOutlined } from '@ant-design/icons';
 import { agentService } from '../../services/agentService';
 import api from '../../services/api';
 import { getStatusLabel } from '../../utils/statusLabels';
-import type { AgentLiveStream, AgentToolActivity, AgentTranscriptEntry, ConversationMessage, RichInputValue, Bug, AnalysisReport } from '../../types';
+import type { AgentLiveStream, AgentToolActivity, AgentTranscriptEntry, ConversationMessage, RichInputValue, Bug, AnalysisReport, RepairSummary as Summary } from '../../types';
 
 const seconds = (ms?: number) => `${Math.max(1, Math.round((ms || 0) / 1000))} 秒`;
 
@@ -130,6 +131,8 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
   const [chat, setChat] = useState<ConversationMessage[]>([]);
   const [discussing, setDiscussing] = useState(false);
   const [status, setStatus] = useState('');
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [outcome, setOutcome] = useState<string | null>(null);
   const [canSend, setCanSend] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [draft, setDraft] = useState<RichInputValue>({ text: '', images: [] });
@@ -139,11 +142,24 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const requestId = useRef<string | null>(null);
+  const followSuccessor = useRef(false);
+  const replyFocused = useRef(false);
   const lastId = useRef(0);
   const scroller = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
+  useEffect(() => {
+    if (!canSend || replyFocused.current || window.location.hash !== '#reply') return;
+    const frame = requestAnimationFrame(() => {
+      const editor = document.getElementById(`conversation-${agentId}`);
+      if (editor?.isContentEditable) { editor.focus(); replyFocused.current = true; }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [agentId, canSend]);
+  const focusComposer = () => {
+    requestAnimationFrame(() => document.getElementById(`conversation-${agentId}`)?.focus());
+  };
   const scrollToLatest = () => {
     pinned.current = true;
     if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
@@ -156,6 +172,8 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
     requestId.current = id;
     try {
       const result = await agentService.sendMessage(agentId, draft, id);
+      // 对话可能触发新一轮修复，新任务创建后自动跟到最新会话。
+      followSuccessor.current = true;
       setDraft({ text: '', images: [] });
       requestId.current = null;
       setRefresh((value) => value + 1);
@@ -216,8 +234,14 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
         setChat(conversation.messages);
         setDiscussing(conversation.discussing);
         setStatus(conversation.status);
+        setSummary(conversation.repair_summary || null);
+        setOutcome(conversation.outcome || null);
         setCanSend(conversation.can_send);
         setError('');
+        if (followSuccessor.current && conversation.assigned_agent_id && conversation.assigned_agent_id !== agentId) {
+          navigate(`/agents/${encodeURIComponent(conversation.assigned_agent_id)}`);
+          return;
+        }
         if (conversation.status === 'awaiting_plan_confirmation') {
           try {
             const result = await agentService.proposal(agentId);
@@ -233,7 +257,7 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
     void load();
     const timer = setInterval(load, (active || discussing) ? 1200 : 5000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [agentId, active, discussing, refresh]);
+  }, [agentId, active, discussing, refresh, navigate]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -290,8 +314,12 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
       {bug && <BugInputMessage key={bug.bug_id} bug={bug} />}
       {groups.map((item) => <React.Fragment key={item.key}>{item.activities ? <ActivityGroup entries={item.activities} /> : item.node}</React.Fragment>)}
       {error && <div role="status" className="transcript-note is-warning">{error}</div>}
+      {!discussing && !live && outcome && <AssistantMessage>
+        <strong>本轮总结 · {outcome}</strong>
+        <RepairSummary summary={summary} />
+      </AssistantMessage>}
       {canSend && ['awaiting_plan_confirmation', 'awaiting_confirmation'].includes(status) && <div className="conversation-checkpoint">
-        <strong>{status === 'awaiting_plan_confirmation' ? '修复方案待确认' : '修复已通过自动验证，等待你的验收'}</strong>
+        <strong>{status === 'awaiting_plan_confirmation' ? '修复方案待确认' : '请验收修复结果'}</strong>
         {status === 'awaiting_plan_confirmation' ? <>
           {proposalError && <p role="status">{proposalError}</p>}
           {!proposal && !proposalError && <p>正在加载方案…</p>}
@@ -308,9 +336,9 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
             <AnalysisDecisions analysis={proposal.analysis} disabled={sending || submittingPlan || reading}
               onReply={(reply) => { setDraft((value) => ({ ...value, document: undefined, text: [value.text, reply].filter(Boolean).join('\n\n') })); requestId.current = null; }} />
           </div>}
-        </> : <p>查看差异、启动预览，确认实际问题是否解决。</p>}
+        </> : <p>启动预览确认实际效果。验收通过直接回复“没问题”或“可以合并”，Agent 会合并并清理工作树；仍有问题就描述现象，Agent 会判断继续修复、更换方案还是重新分析根因。</p>}
         {waitingForPlan ? <>
-          <p className="proposal-feedback-note">在下方直接回复待确认问题或修改意见，提交后会重新分析。确认当前方案则开始修复。</p>
+          <p className="proposal-feedback-note">可以直接回复“方案 1 可以，开始吧”，或在下方提出修改意见，Agent 会据此开始修复或重新分析。</p>
           <Button type="primary" loading={submittingPlan} disabled={!canSubmitPlan || sending || reading || hasDraft} onClick={() => void submitPlan(false)}>
             {proposal?.analysis?.open_questions?.length ? '按暂定方案开始修复' : '确认方案并开始修复'}
           </Button>
@@ -327,17 +355,16 @@ const ConversationContent: React.FC<{ agentId: string; active: boolean; stage?: 
       {(active || status === 'busy' || discussing || live || activity) && <ExecutionStatus activity={activity} live={live} stage={stage} discussing={discussing} disconnected={!!error} />}
       <div className="conversation-input-shell">
       <RichInput variant="chat" id={`conversation-${agentId}`} value={draft} onChange={(value) => { setDraft(value); requestId.current = null; }}
-        onSubmit={() => { if (waitingForPlan) void submitPlan(true); else void send(); }}
+        onSubmit={() => void send()}
         placeholder="补充问题、添加截图，或询问进展…" maxLength={4000} disabled={sending || submittingPlan || !canSend} onBusyChange={setReading}
         footer={<div className="conversation-actions">
         {(active || discussing) && <Button type="text" icon={<StopOutlined />} loading={stopping} onClick={() => void stop()}>停止{discussing ? '回复' : '执行'}</Button>}
-        {waitingForPlan && <Button type="text" disabled={!canSend || sending || submittingPlan || reading || !hasDraft} onClick={() => void send()}>仅讨论</Button>}
-        {waitingForPlan ? <Button type="primary" loading={submittingPlan} disabled={!canSubmitPlan || sending || reading || !hasDraft} onClick={() => void submitPlan(true)}>提交反馈并重新分析</Button> : <Button type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送消息" title="发送消息" loading={sending} disabled={!canSend || reading || (!draft.text.trim() && !draft.images.length)} onClick={() => void send()} />}
+        {<Button type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送消息" title="发送消息" loading={sending} disabled={!canSend || reading || (!draft.text.trim() && !draft.images.length)} onClick={() => void send()} />}
       </div>} />
       </div>
-      <div className="conversation-composer-hint"><span>{!status ? (error ? '连接恢复后即可继续对话' : '正在连接会话…') : !canSend ? '历史记录 · 请在最新会话中继续' : waitingForPlan ? '回复将作为反馈，提交后重新分析' : (active || discussing) ? '可以继续补充，助手会在执行中接收' : '与修复助手继续对话'}</span><span><kbd>Enter</kbd> {waitingForPlan ? '提交反馈' : '发送'}<span className="conversation-newline-hint"> · <kbd>Shift + Enter</kbd> 换行</span></span></div>
+      <div className="conversation-composer-hint"><span>{!status ? (error ? '连接恢复后即可继续对话' : '正在连接会话…') : !canSend ? '历史记录 · 请在最新会话中继续' : waitingForPlan ? '回复会被理解为确认方案或修改意见' : status === 'awaiting_confirmation' ? '回复会被理解为验收意见：通过即合并，有问题即返工' : (active || discussing) ? '可以继续补充，助手会在执行中接收' : '与修复助手继续对话'}</span><span><kbd>Enter</kbd> 发送<span className="conversation-newline-hint"> · <kbd>Shift + Enter</kbd> 换行</span></span></div>
     </div>
-      <RepairReview agentId={reviewing ? agentId : null} onClose={() => setReviewing(false)} onConfirmed={() => setRefresh((value) => value + 1)} />
+      <RepairReview agentId={reviewing ? agentId : null} onClose={() => setReviewing(false)} onConfirmed={() => setRefresh((value) => value + 1)} onFeedback={focusComposer} />
     </div>
   );
 };

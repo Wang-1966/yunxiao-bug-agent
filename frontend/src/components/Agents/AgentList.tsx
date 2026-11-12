@@ -12,6 +12,7 @@ import {
   Space,
   Drawer,
   Segmented,
+  Alert,
 } from 'antd';
 import {
   StopOutlined,
@@ -31,10 +32,12 @@ import { AgentOffice } from './AgentOffice';
 import { AgentAvatar } from '../Shared/AgentAvatar';
 import type { AgentStatus, Bug } from '../../types';
 import { getStatusLabel } from '../../utils/statusLabels';
+import AttentionQueue from './AttentionQueue';
 
 const AgentList: React.FC = () => {
   const [agents, setAgents] = useState<AgentStatus[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [retryingBugs, setRetryingBugs] = useState<string[]>([]);
   const [deletingAgents, setDeletingAgents] = useState<string[]>([]);
   const [stoppingAgents, setStoppingAgents] = useState<string[]>([]);
@@ -56,7 +59,9 @@ const AgentList: React.FC = () => {
     try {
       const data = await agentService.list();
       setAgents(data || []);
+      setLoadError(false);
     } catch (error) {
+      setLoadError(true);
       console.error('Failed to load agents:', error);
     } finally {
       setLoading(false);
@@ -330,9 +335,9 @@ const AgentList: React.FC = () => {
       <div className="page-heading">
         <div>
           <div className="page-eyebrow">🤖 AGENT WORKSTATIONS</div>
-          <h1>Agent 工位实况与闯关监控</h1>
+          <h1>修复任务与待办</h1>
           <p className="page-subtitle">
-            每位特工拥有独立 Git Worktree 工位，实时展示思考流、五关修复进度与待拍板方案
+            先处理需要你决定的事项，再查看各个任务的修复进展
           </p>
         </div>
 
@@ -371,6 +376,8 @@ const AgentList: React.FC = () => {
         </Space>
       </div>
 
+      {loadError && <Alert type="warning" showIcon message="任务刷新失败，当前待办可能不是最新状态，正在重试。" style={{ marginBottom: 16 }} />}
+      <AttentionQueue agents={agents} loading={loading} onReview={setReviewAgent} />
       <section className="data-section">
         {viewMode === 'office' ? (
           <AgentOffice

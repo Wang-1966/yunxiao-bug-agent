@@ -7,6 +7,8 @@ import signal
 import sys
 import tempfile
 import uuid
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -205,14 +207,25 @@ async def verify_worktree(worktree, command, repro_command=None):
     """先跑项目验证命令；通过后再跑复现测试命令（修复前失败、修复后必须通过）。"""
     if not command or not command.strip():
         raise ValueError('代码修改已保留，但未配置验证命令；请在项目管理填写后重新执行')
-    code, output = await run_process(['git', 'diff', '--check', 'HEAD'], worktree)
+    checks = []
+
+    async def check(kind, label, args, shown, timeout=60):
+        started = time.monotonic()
+        code, output = await run_process(args, worktree, timeout)
+        checks.append({'id': kind, 'kind': kind, 'label': label, 'command': shown,
+                       'passed': code == 0, 'exit_code': code, 'output': output[-20000:],
+                       'completed_at': datetime.now(timezone.utc).isoformat(),
+                       'duration_ms': round((time.monotonic() - started) * 1000)})
+        return code, output
+
+    code, output = await check('diff', '代码差异检查', ['git', 'diff', '--check', 'HEAD'], 'git diff --check HEAD')
     if code:
-        return {'passed': False, 'command': 'git diff --check', 'exit_code': code, 'output': output[-20000:]}
+        return {'passed': False, 'command': 'git diff --check', 'exit_code': code, 'output': output[-20000:], 'checks': checks}
     # 只执行用户保存的命令和系统校验过的复现命令；模型本身不具备无沙箱的 shell。
-    code, output = await run_process(['/bin/sh', '-c', command], worktree, get_settings().agent_timeout)
-    result = {'passed': code == 0, 'command': command, 'exit_code': code, 'output': output[-20000:]}
+    code, output = await check('project', '项目配置检查', ['/bin/sh', '-c', command], command, get_settings().agent_timeout)
+    result = {'passed': code == 0, 'command': command, 'exit_code': code, 'output': output[-20000:], 'checks': checks}
     if code == 0 and repro_command:
-        code, output = await run_process(['/bin/sh', '-c', repro_command], worktree, get_settings().agent_timeout)
+        code, output = await check('reproduction', '修复后复现测试', ['/bin/sh', '-c', repro_command], repro_command, get_settings().agent_timeout)
         result.update(repro_command=repro_command, repro_exit_code=code, repro_output=output[-20000:])
         if code:
             result.update(passed=False, command=f'复现测试：{repro_command}', exit_code=code, output=output[-20000:])
@@ -253,4 +266,6 @@ async def verify_and_commit_repair(worktree, command, bug_id, repair_branch, bas
     await git(worktree, 'update-ref', f'refs/heads/{repair_branch}', commit, head)
     if await git(worktree, 'status', '--porcelain'):
         raise ValueError('生成提交后工作树发生变化，已保留提交但不能进入验收')
+    result['verification'] = {'git_commit_hash': commit, 'tree_hash': tree,
+                              'completed_at': datetime.now(timezone.utc).isoformat()}
     return {'test_results': result, 'git_commit_hash': commit, 'modified_files': names}

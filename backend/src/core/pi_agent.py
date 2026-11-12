@@ -1,4 +1,4 @@
-"""Pi SDK 子进程桥接。模型凭据通过 stdin 传递，工具执行和阶段校验仍在宿主中。"""
+"""Pi SDK 桥接；原生编码工具由 Pi 执行，宿主负责权限、证据与阶段校验。"""
 import asyncio
 import contextlib
 import json
@@ -11,6 +11,7 @@ from ..config import get_settings
 from .agent_tools import ToolError, command_env
 from .tool_agent import repair_unicode_escapes, session_path
 from .context_management import ContextRun
+from .pi_tools import PiTools, READ_TOOLS
 
 BRIDGE = Path(__file__).resolve().parents[2] / 'pi' / 'bridge.mjs'
 
@@ -23,6 +24,7 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
         raise ValueError('Pi 依赖未安装，请在 backend/pi 执行 npm ci（Node.js >=22.19）')
     provider = llm.client.provider
     settings = get_settings()
+    native = PiTools(workspace, tools)
     path = session_path(workspace.root).with_suffix('.chat.pi.jsonl' if log_context == 'discussion' else '.pi.jsonl')
     config = {
         'type': 'start', 'cwd': str(workspace.root), 'session': str(path.resolve()),
@@ -33,13 +35,15 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
         'keepRecentTokens': min(20000, max(2048, context.budget.target // 2)),
         'inputLimit': context.budget.limit,
         'temperature': temperature if temperature is not None else llm.defaults.get('temperature'),
-        'system': messages[0]['content'], 'tools': [tool.schema() for tool in tools],
+        'system': messages[0]['content'], 'tools': [tool.schema() for tool in native.host_tools],
         'prompt': messages[-1]['content'],
+        **native.config(),
     }
+    config['system'] += '\n本次可用工具：' + '、'.join([*native.names, *(tool.name for tool in native.host_tools)]) + '。按本次定义使用工具名称和参数；历史会话可能使用旧名称。'
     process = await asyncio.create_subprocess_exec(settings.pi_node_command, str(BRIDGE),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         cwd=str(workspace.root), env=command_env(), start_new_session=True, limit=32 * 1024 * 1024)
-    by_name = {tool.name: tool for tool in tools}
+    by_name = {tool.name: tool for tool in native.host_tools}
     outcome = None
     terminal_seen = False
     agent_id = getattr(stream, 'agent_id', None)
@@ -47,6 +51,7 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
     sent = set()
     ready = asyncio.Event()
     in_question = False
+    native_calls = {}
 
     async def send(value):
         process.stdin.write((json.dumps(value, ensure_ascii=False) + '\n').encode())
@@ -102,6 +107,56 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
                                 await on_operation(f"Pi 上下文已整理：约 {event.get('before_tokens')} → {event.get('after_tokens')} tokens；历史工具证据可回查")
                             else:
                                 await on_operation('Pi 上下文整理已取消' if status == 'cancelled' else 'Pi 上下文整理失败，原会话已保留')
+                elif kind == 'resources':
+                    allowed = []
+                    for path in event['paths']:
+                        try:
+                            allowed.append(str(workspace.resolve(path)))
+                        except ToolError:
+                            pass
+                    await send({'type': 'result', 'id': event['id'], 'paths': allowed})
+                elif kind == 'native_start':
+                    result = {'type': 'result', 'id': event['id']}
+                    name, args = event['name'], repair_unicode_escapes(event['args'])
+                    execution = context.begin_tool(name, event['callId'], args, readonly=name in READ_TOOLS)
+                    try:
+                        if terminal_seen:
+                            raise ToolError('当前阶段已经提交')
+                        permitted = native.permit(name, args)
+                        token = None
+                        if stream:
+                            await stream.finish()
+                            token = stream.tool_started(name)
+                        native_calls[event['callId']] = (execution, permitted, token)
+                        result['args'] = permitted
+                    except (ToolError, ValueError, TypeError, OSError) as exc:
+                        context.end_tool(execution, str(exc), status='failed', error_type=type(exc).__name__)
+                        result['error'] = str(exc)
+                    await send(result)
+                elif kind == 'native_end':
+                    execution, args, token = native_calls.pop(event['callId'])
+                    try:
+                        name = execution['name']
+                        value = event['result']
+                        text = '\n'.join(part['text'] for part in value.get('content', []) if part.get('type') == 'text')
+                        # Preserve Pi's structured exit code and native truncation notices in evidence.
+                        if name == 'bash' and value.get('structuredContent'):
+                            text += '\n' + json.dumps(value['structuredContent'], ensure_ascii=False)
+                        if value.get('details'):
+                            text += '\n' + json.dumps(value['details'], ensure_ascii=False)
+                        structured = value.get('structuredContent')
+                        truncated = bool((structured.get('truncated') if isinstance(structured, dict) else False) or
+                                         ((value.get('details') or {}).get('truncation') or {}).get('truncated'))
+                        evidence_id = context.end_tool(execution, text, status='failed' if value.get('isError') else 'completed',
+                                                       source_truncated=truncated)
+                        if not value.get('isError'):
+                            native.completed(name, args)
+                        await send({'type': 'result', 'id': event['id'], 'evidenceId': evidence_id})
+                        if on_operation:
+                            await on_operation(f"源码操作 Pi（{name}）：{'失败' if value.get('isError') else '完成'}")
+                    finally:
+                        if stream and token is not None:
+                            stream.tool_finished(token)
                 elif kind == 'tool':
                     name, args = event['name'], repair_unicode_escapes(event['args'])
                     tool = by_name.get(name)
@@ -143,6 +198,10 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
             # Do not echo arbitrary subprocess stderr, which may contain provider payloads.
             raise ValueError(f'Pi 子进程意外退出（退出码 {await process.wait()}），会话与工作树已保留')
     finally:
+        for execution, _, token in native_calls.values():
+            context.end_tool(execution, status='uncertain')
+            if stream and token is not None:
+                stream.tool_finished(token)
         steering.cancel()
         if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):

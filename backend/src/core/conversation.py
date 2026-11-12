@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import uuid
 
 import aiosqlite
 
@@ -25,6 +26,23 @@ def lock_for(agent_id):
 
 def db_path():
     return get_settings().database_url.replace('sqlite+aiosqlite:///', '')
+
+
+async def begin_question(agent_id, question):
+    decision_id = f'question-{uuid.uuid4().hex}'
+    async with aiosqlite.connect(db_path()) as db:
+        await db.execute("""INSERT INTO decisions (decision_id, bug_id, agent_id, stage, question, options)
+            SELECT ?, current_bug_id, agent_id, 'question', ?, '[]' FROM agents WHERE agent_id=?""",
+                         (decision_id, question, agent_id))
+        await db.commit()
+    return decision_id
+
+
+async def finish_question(decision_id, *, answered=False):
+    async with aiosqlite.connect(db_path()) as db:
+        await db.execute("UPDATE decisions SET status=?, answered_at=CURRENT_TIMESTAMP WHERE decision_id=? AND status='pending'",
+                         ('answered' if answered else 'timeout', decision_id))
+        await db.commit()
 
 
 async def append_assistant(agent_id, text):

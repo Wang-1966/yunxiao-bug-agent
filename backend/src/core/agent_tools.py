@@ -275,6 +275,18 @@ class Workspace:
         return relative
 
     # ---- 读取 ----
+    def record_read(self, path, offset=1, limit=READ_DEFAULT_LINES):
+        """记录实际成功的读取，供两种内核的后续修复轮次定位源码。"""
+        target = self.resolve(path)
+        name = self.rel(target)
+        self.read_paths.add(name)
+        self.touch(name)
+        if target.name not in ('AGENTS.md', 'CLAUDE.md'):
+            request = {'path': name, 'start_line': offset, 'count': limit}
+            if request in self.read_requests:
+                self.read_requests.remove(request)
+            self.read_requests.append(request)
+
     def read_file(self, path, offset=1, limit=READ_DEFAULT_LINES):
         target = self.resolve(path)
         if not target.is_file():
@@ -302,13 +314,7 @@ class Workspace:
         body = '\n'.join(f'{i + 1}→{lines[i]}' for i in range(offset - 1, end))
         truncated = len(body) > READ_MAX_CHARS
         body = body[:READ_MAX_CHARS]
-        self.read_paths.add(name)
-        self.touch(name)
-        if not whole:
-            request = {'path': name, 'start_line': offset, 'count': limit}
-            if request in self.read_requests:
-                self.read_requests.remove(request)
-            self.read_requests.append(request)
+        self.record_read(name, offset, limit)
         footer = ''
         if truncated:
             footer = '\n（输出过长已截断，请缩小 limit）'

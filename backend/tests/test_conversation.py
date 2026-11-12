@@ -54,6 +54,47 @@ async def test_persistence_idempotency_and_ownership(chat_db):
     assert exc.value.status_code == 409
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,bug_status,outcome', [
+    ('awaiting_confirmation', 'awaiting_confirmation', '修复完成，等待你的验收'),
+    ('idle', 'resolved', '修复已验收并交付'),
+    ('error', 'failed', '本轮执行未完成，可继续对话处理'),
+    ('busy', 'fixing', None),
+])
+async def test_conversation_returns_persisted_summary_and_accurate_outcome(chat_db, status, bug_status, outcome):
+    path, runner = chat_db
+    brief = {'root_cause': '初始值错误。', 'solution': '已修正初始值。'}
+    async with aiosqlite.connect(path) as db:
+        await db.execute('UPDATE agents SET status=?', (status,))
+        await db.execute('UPDATE bugs SET status=?', (bug_status,))
+        await db.execute("INSERT INTO task_history (task_id, bug_id, agent_id, stage, status, result) VALUES ('task', 'bug', 'agent', 'verifying', 'running', ?)",
+                         (json.dumps({'repair_summary': brief, 'fix_summary': '完整记录' * 500}),))
+        await db.commit()
+    result = await agents.get_conversation('agent')
+    assert result['repair_summary'] == brief
+    assert result['outcome'] == outcome
+    assert result['can_send'] is True
+    assert not runner.running_agents
+
+
+@pytest.mark.asyncio
+async def test_summary_survives_workflow_save_and_runtime_restart(chat_db):
+    from types import SimpleNamespace
+    path, runner = chat_db
+    brief = {'root_cause': '连续数字无法在行内换行。', 'solution': '调整正文换行规则，保留公式行为。'}
+    async with aiosqlite.connect(path) as db:
+        await db.execute("INSERT INTO task_history (task_id, bug_id, agent_id, stage, status) VALUES ('task', 'bug', 'agent', 'fixing', 'running')")
+        await db.commit()
+    runner.agent_states['agent'] = {'state': {'stage': 'awaiting_confirmation', 'repair_summary': brief, 'fix_summary': '完整工程记录'}, 'progress': 90}
+    task = SimpleNamespace(task_id='task', bug_id='bug', input_snapshot={})
+    await runner._save_status('agent', task, 'awaiting_confirmation', 'awaiting_confirmation', '等待验收')
+    runner.agent_states.clear()
+    assert (await agents.get_conversation('agent'))['repair_summary'] == brief
+    async with aiosqlite.connect(path) as db:
+        saved = json.loads((await (await db.execute('SELECT result FROM task_history')).fetchone())[0])
+    assert saved['fix_summary'] == '完整工程记录'
+
+
 @pytest.mark.parametrize('text', ['继续', '继续修复', '请继续执行！', '重试', '恢复任务'])
 def test_explicit_continue_requests(text):
     assert conversation.is_resume_request(text)

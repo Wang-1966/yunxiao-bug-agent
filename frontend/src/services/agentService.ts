@@ -1,5 +1,5 @@
 import api from './api';
-import type { AgentLiveStream, AgentToolActivity, AgentTranscriptEntry, RichInputNode, RichInputValue, ConversationMessage } from '../types';
+import type { AgentLiveStream, AgentToolActivity, AgentTranscriptEntry, RichInputNode, RichInputValue, ConversationMessage, CriterionReview, RepairSummary } from '../types';
 import { assignAgentLooks } from '../utils/agentLooks';
 
 export interface PreviewStatus {
@@ -44,8 +44,9 @@ export const agentService = {
     return (await api.delete(`/api/agents/${encodeURIComponent(agentId)}/preview`)).data as PreviewStatus;
   },
 
-  async confirm(agentId: string, confirmed: boolean, feedback: string, gitCommitHash?: string, images: string[] = [], document?: RichInputNode) {
-    const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/confirmation`, { confirmed, feedback, images, document, git_commit_hash: gitCommitHash });
+  async confirm(agentId: string, confirmed: boolean, feedback: string, gitCommitHash?: string, images: string[] = [], document?: RichInputNode, acceptance?: { version: string; results: CriterionReview[] }) {
+    const response = await api.post(`/api/agents/${encodeURIComponent(agentId)}/confirmation`, { confirmed, feedback, images, document, git_commit_hash: gitCommitHash,
+      ...(acceptance ? { acceptance_version: acceptance.version, acceptance_results: acceptance.results } : {}) });
     return response.data;
   },
 
@@ -70,7 +71,8 @@ export const agentService = {
 
   async conversation(agentId: string) {
     return (await api.get(`/api/agents/${encodeURIComponent(agentId)}/conversation`)).data as {
-      messages: ConversationMessage[]; discussing: boolean; engine: 'native' | 'pi'; status: string; can_send: boolean;
+      messages: ConversationMessage[]; discussing: boolean; engine: 'native' | 'pi'; status: string; can_send: boolean; assigned_agent_id?: string | null;
+      repair_summary?: RepairSummary | null; outcome?: string | null;
     };
   },
 

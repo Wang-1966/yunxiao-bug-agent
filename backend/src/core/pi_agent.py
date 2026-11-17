@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 
 from ..config import get_settings
-from .agent_tools import ToolError, command_env
-from .tool_agent import repair_unicode_escapes, session_path
+from .agent_tools import ToolError, command_env, sandbox_available
+from .agent_protocol import repair_unicode_escapes, session_path
 from .context_management import ContextRun
 from .pi_tools import PiTools, READ_TOOLS
 
@@ -24,19 +24,18 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
         raise ValueError('Pi 依赖未安装，请在 backend/pi 执行 npm ci（Node.js >=22.19）')
     provider = llm.client.provider
     settings = get_settings()
-    native = PiTools(workspace, tools)
+    native = PiTools(workspace, tools, commands=sandbox_available())
     path = session_path(workspace.root).with_suffix('.chat.pi.jsonl' if log_context == 'discussion' else '.pi.jsonl')
     config = {
         'type': 'start', 'cwd': str(workspace.root), 'session': str(path.resolve()),
         'baseUrl': provider.base_url, 'apiKey': provider.api_key, 'model': llm.model,
+        'providerId': getattr(provider, 'id', None),
         'maxTokens': llm.defaults.get('max_tokens', 16000), 'maxTurns': max_turns,
-        'contextWindow': context.budget.window,
-        'reserveTokens': context.budget.window - context.budget.trigger,
-        'keepRecentTokens': min(20000, max(2048, context.budget.target // 2)),
-        'inputLimit': context.budget.limit,
+        'contextWindow': context.context_window,
         'temperature': temperature if temperature is not None else llm.defaults.get('temperature'),
         'system': messages[0]['content'], 'tools': [tool.schema() for tool in native.host_tools],
         'prompt': messages[-1]['content'],
+        'observe': context.trace.root is not None,
         **native.config(),
     }
     config['system'] += '\n本次可用工具：' + '、'.join([*native.names, *(tool.name for tool in native.host_tools)]) + '。按本次定义使用工具名称和参数；历史会话可能使用旧名称。'
@@ -79,7 +78,13 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
             while line := await process.stdout.readline():
                 event = json.loads(line)
                 kind = event.get('type')
-                if kind == 'ready':
+                if kind == 'model_context':
+                    context.context_window = event['contextWindow']
+                    context.emit('model_context', context_window=event['contextWindow'], window_source=event['windowSource'])
+                    if on_operation:
+                        source = {'configured': '提供商配置', 'project_default': '项目默认配置', 'pi_catalog': 'Pi 模型目录'}[event['windowSource']]
+                        await on_operation(f"模型 {llm.model} 上下文窗口：{event['contextWindow']:,} tokens（{source}）")
+                elif kind == 'ready':
                     ready.set()
                 elif kind == 'delivered' and agent_id:
                     await conversation.delivered(agent_id, event['ids'])
@@ -96,9 +101,18 @@ async def _run_pi_agent(llm, messages, tools, *, context, max_turns=80, on_opera
                     await on_operation(event['text'])
                 elif kind == 'context_metric':
                     metric = event.get('event')
-                    if metric in ('compaction_start', 'compaction', 'request_start', 'request_end', 'budget_blocked'):
+                    if metric == 'request_start':
+                        context.trace.start(f"request-{event['request_id']}", name=event.get('request_kind', 'model'),
+                                            kind='generation', input=event.get('input'), metadata={'turn': event.get('turn')})
+                    elif metric == 'request_end':
+                        usage = event.get('usage') or {}
+                        context.trace.end(f"request-{event['request_id']}", output=event.get('output'),
+                            usage={'input': usage.get('input_tokens'), 'output': usage.get('output_tokens'),
+                                   'input_cache_read': usage.get('cached_tokens')},
+                            error=event.get('error') or (event.get('status') if event.get('status') != 'completed' else None))
+                    if metric in ('compaction_start', 'compaction', 'request_start', 'request_end'):
                         fields = {key: event[key] for key in ('status', 'reason', 'before_tokens', 'after_tokens',
-                            'duration_ms', 'summary_chars', 'estimated_input_tokens', 'input_limit', 'usage', 'turn', 'will_retry',
+                            'duration_ms', 'summary_chars', 'estimated_input_tokens', 'usage', 'turn', 'will_retry',
                             'request_id', 'request_kind') if key in event}
                         context.emit(metric, **fields)
                         if metric == 'compaction' and on_operation:
@@ -223,7 +237,7 @@ async def run_pi_agent(llm, messages, tools, **kwargs):
     if workspace is None:
         raise ValueError('Pi 执行需要隔离工作树')
     context = ContextRun(workspace, engine='pi', phase=kwargs.get('log_context', 'agent'), llm=llm,
-                         agent_id=getattr(kwargs.get('stream'), 'agent_id', None))
+                         agent_id=getattr(kwargs.get('stream'), 'agent_id', None), trace_metadata=kwargs.pop('trace_metadata', None))
     status = 'failed'
     try:
         result = await _run_pi_agent(llm, messages, [*tools, context.evidence_tool()], context=context, **kwargs)

@@ -19,10 +19,10 @@ from ..prompts import render_prompt
 from .analysis_decisions import ChangeImpact, DecisionQuestion, normalize_decisions
 from .acceptance import AcceptanceCheck, acceptance_plan
 from .repair_summary import RepairSummary
-from .agent_tools import (ToolError, Workspace, build_tools, clip_output, is_test_path, prefers_apply_patch, run_in_worktree, sandbox_available)
+from .agent_tools import (ToolError, Workspace, build_tools, clip_output, is_test_path, run_in_worktree, sandbox_available)
 from .browser_tool import close_browser
 from .repair_executor import changed_files, git
-from .tool_agent import load_session, save_session, session_path, submit_tool
+from .agent_protocol import submit_tool
 from .agent_runtime import run_tool_agent
 
 REPRO_TIMEOUT = 600
@@ -68,28 +68,24 @@ def protected_dirs() -> list:
 
 async def repository_context(worktree) -> dict:
     """AGENTS.md 全文与根目录概览，写入分析任务提示词。"""
-    from .runtime_config import engine
     root = Path(worktree)
     names = [n for n in (await git(root, 'ls-files', '-z')).split('\0') if n]
     counts = Counter(name.split('/')[0] for name in names)
     inventory = '\n'.join(f'{name}：{count} 个文件' for name, count in sorted(counts.items()))
-    instructions = ('根目录规范由 Pi 资源加载器载入；读取子目录文件前先检查适用的 AGENTS.md。'
-                    if engine() == 'pi' else Workspace(root).instructions() or '无')
+    instructions = '根目录规范由 Pi 资源加载器载入；读取子目录文件前先检查适用的 AGENTS.md。'
     return {'instructions': instructions, 'inventory': inventory}
 
 
-def system_prompt(editor='edit_file', browser=False) -> str:
-    from .runtime_config import engine
-    pi = engine() == 'pi'
-    inventory = 'read、grep、ls、find、edit、write' if pi else f'read_file、grep、list_dir、find_files、{editor}'
-    command = 'bash' if pi else 'run_command'
+def system_prompt(browser=False) -> str:
+    inventory = 'read、grep、ls、find、edit、write'
+    command = 'bash'
     note = f'{command}（沙箱内运行测试、类型检查、构建、安装依赖）' if sandbox_available() else '本环境不支持命令沙箱，无法运行命令，只能静态分析（系统在你提交时仍会运行复现命令）'
     browser_note = 'browser（打开项目预览，点击、输入、截图核对界面）' if browser else '未配置预览命令，不能打开页面'
     return render_prompt('agent_system', commands_note=note, inventory=inventory, browser_note=browser_note)
 
 
-def new_session(user_prompt: str, extra_system: str = '', *, editor='edit_file', browser=False) -> list:
-    return [{'role': 'system', 'content': system_prompt(editor, browser) + extra_system}, {'role': 'user', 'content': user_prompt}]
+def new_session(user_prompt: str, extra_system: str = '', *, browser=False) -> list:
+    return [{'role': 'system', 'content': system_prompt(browser) + extra_system}, {'role': 'user', 'content': user_prompt}]
 
 
 # ---------------- 分析 ----------------
@@ -208,10 +204,6 @@ def compose_report(analysis, repro, review) -> str:
     return compose_report_simple(analysis, repro)
 
 
-def _editor(llm) -> str:
-    return 'apply_patch' if prefers_apply_patch(getattr(llm, 'model', '') or '') else 'edit_file'
-
-
 async def run_analysis(llm, reviewer, worktree, prompt, *, bug, visual='', images=None, previous_attempt=None, on_operation=None, stream=None, preview=None):
     """执行根因分析，依赖工具验证而非 LLM 审查。
 
@@ -226,20 +218,15 @@ async def run_analysis(llm, reviewer, worktree, prompt, *, bug, visual='', image
 
         async def previous(path, offset):
             return await previous_diff(worktree, previous_attempt, path, offset)
-    editor = _editor(llm)
-    tools = build_tools(workspace, commands=sandbox_available(), images=images, previous=previous, editor=editor, preview=preview) + [_analysis_tool(workspace, worktree, holder)]
+    tools = build_tools(workspace, images=images, previous=previous, preview=preview) + [_analysis_tool(workspace, worktree, holder)]
 
     # 增强系统提示：强调自我检查和工具验证
     extra_system = '\n\n重要：提交前请自我检查：\n- 复现测试是否真的失败？\n- 根因定位是否有源码证据支持？\n- 多个假设是否都经过验证？\n- 是否先调查再提问？decision_questions 仅保留用户才能决定的阻塞问题；技术假设写入 assumptions，验证局限写入 verification_limits；每个方案的 impact 必须引用实际改动，不能因出现 API 或字段等词就判为高风险。'
-    messages = load_session(session_path(worktree))
-    if messages:
-        messages.append({'role': 'user', 'content': prompt + extra_system})
-    else:
-        messages = new_session(prompt + extra_system, editor=editor, browser=bool(preview))
+    messages = new_session(prompt + extra_system, browser=bool(preview))
 
     try:
         # 直接运行一次，依赖工具验证和自我检查
-        await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='analyze', workspace=workspace)
+        await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='analyze', workspace=workspace, trace_metadata={'bug_id': bug.get('id'), 'bug_title': bug.get('title')})
         analysis, repro = holder['analysis'], holder['repro']
 
         # 简化的置信度评估：只看是否有复现测试
@@ -248,7 +235,6 @@ async def run_analysis(llm, reviewer, worktree, prompt, *, bug, visual='', image
         # 生成报告（不再包含 review 信息）
         root_cause = compose_report_simple(analysis, repro)
 
-        save_session(session_path(worktree), messages)
 
         if on_operation:
             await on_operation(f"分析完成，置信度：{confidence}，{'已复现' if repro.get('reproduced') else '未能自动复现'}")
@@ -341,8 +327,7 @@ async def run_merge_resolution(worktree, files, llm=None):
                 raise ToolError(f'{name} 仍有冲突标记')
         return {'summary': summary}
 
-    editor = _editor(llm)
-    tools = build_tools(workspace, commands=sandbox_available(), editor=editor) + [
+    tools = build_tools(workspace) + [
         submit_tool('submit_merge', '冲突已解决并保留双方功能时提交。系统会检查冲突标记并完成合并提交。',
                      {'type': 'object', 'properties': {'summary': {'type': 'string', 'description': '双方分别保留了什么'}}, 'required': ['summary']}, validate)]
     prompt = (
@@ -373,25 +358,15 @@ async def run_fix(llm, reviewer, worktree, prompt, *, bug, analysis, repro, visu
 
         async def previous(path, offset):
             return await previous_diff(worktree, previous_attempt, path, offset)
-    editor = _editor(llm)
-    tools = build_tools(workspace, commands=sandbox_available(), images=images, previous=previous, editor=editor, preview=preview) + [_fix_tool(workspace, worktree, repro, holder)]
-    path = session_path(worktree)
-    messages = load_session(path)
-
-    # 增强提示：强调测试验证和自我检查
-    extra_instructions = '\n\n重要：\n- 修改代码后立即运行相关测试验证\n- 确保复现测试能通过\n- 不确定时使用命令工具运行测试检查\n- 提交前确认所有改动都是必要的'
-
-    if messages:
-        messages.append({'role': 'user', 'content': prompt + extra_instructions})
-    else:
-        full_prompt = prompt + ('\n\n仓库约束（AGENTS.md）：\n' + instructions if instructions else '') + extra_instructions
-        messages = new_session(full_prompt, editor=editor, browser=bool(preview))
+    tools = build_tools(workspace, images=images, previous=previous, preview=preview) + [_fix_tool(workspace, worktree, repro, holder)]
+    extra_instructions = '\n\n重要：修改代码后运行相关测试，确认复现测试通过；提交前确认所有改动都是必要的。'
+    full_prompt = prompt + ('\n\n仓库约束（AGENTS.md）：\n' + instructions if instructions else '') + extra_instructions
+    messages = new_session(full_prompt, browser=bool(preview))
 
     try:
         # 直接运行一次，依赖工具验证
-        await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='fix', workspace=workspace)
+        await run_tool_agent(llm, messages, tools, on_operation=on_operation, stream=stream, deadline=deadline, log_context='fix', workspace=workspace, trace_metadata={'bug_id': bug.get('id'), 'bug_title': bug.get('title')})
 
-        save_session(path, messages)
         summary = holder['summary']
 
         if on_operation:

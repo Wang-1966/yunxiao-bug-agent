@@ -2,23 +2,57 @@
 import json
 
 
+SERVERS = []
+
+
 class ScriptedLLM:
-    """achat 按顺序返回脚本回复；回复为 callable 时以当前 messages 生成。"""
-
+    """本地模拟模型服务；实际循环和工具执行使用真实 Pi SDK。"""
     def __init__(self, replies):
-        self.replies = list(replies)
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from types import SimpleNamespace
+        import threading
+        self.replies = [reply for reply in replies if reply.get('calls') != [('submit_review', {'refuted': False, 'summary': '证据成立'})]]
         self.calls = []
-
-    async def achat(self, messages, tools, **kwargs):
-        self.calls.append({'messages': json.loads(json.dumps(messages)), 'tools': [t['function']['name'] for t in tools], 'kwargs': kwargs})
-        assert self.replies, '脚本回复已用完，模型被多调用了一次'
-        reply = self.replies.pop(0)
-        if callable(reply):
-            reply = reply(messages)
-        n = len(self.calls)
-        return {'content': reply.get('content', ''), 'tool_calls': [
-            {'id': f'call_{n}_{i}', 'type': 'function', 'function': {'name': name, 'arguments': args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)}}
-            for i, (name, args) in enumerate(reply['calls'])]}
+        model = self
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                model.calls.append({'messages': payload['messages'], 'tools': [t['function']['name'] for t in payload.get('tools', [])]})
+                if not model.replies:
+                    self.send_error(400, 'Script exhausted')
+                    return
+                reply = model.replies.pop(0)
+                if callable(reply): reply = reply(payload['messages'])
+                calls = []
+                for index, (name, args) in enumerate(reply['calls']):
+                    if name == 'read_file': name = 'read'
+                    if name == 'edit_file':
+                        args = dict(args)
+                        old, new = args.pop('old_string'), args.pop('new_string')
+                        name = 'edit' if old else 'write'
+                        args.update({'edits': [{'oldText': old, 'newText': new}]} if old else {'content': new})
+                    if name == 'submit_fix':
+                        args = {**args, 'repair_summary': args.get('repair_summary', {'root_cause': '赋值不符合预期', 'solution': '修正赋值'})}
+                    if name == 'submit_reply': args = {'action': 'none', **args}
+                    calls.append({'index': index, 'id': f'call_{len(model.calls)}_{index}', 'type': 'function',
+                                  'function': {'name': name, 'arguments': json.dumps(args)}})
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.end_headers()
+                for chunk in [
+                    {'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': reply.get('content', ''), 'tool_calls': calls}, 'finish_reason': None}]},
+                    {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls' if calls else 'stop'}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 10}},
+                ]:
+                    self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
+                self.wfile.write(b'data: [DONE]\n\n')
+                self.wfile.flush()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        SERVERS.append(server)
+        self.client = SimpleNamespace(provider=SimpleNamespace(base_url=f'http://127.0.0.1:{server.server_port}/v1', api_key='test-key', id='test', context_windows={'test-model': 64000}))
+        self.model = 'test-model'
+        self.defaults = {'max_tokens': 4096}
 
     async def ainvoke(self, *args, **kwargs):
         raise AssertionError('新流程不应再调用文本 ainvoke')
@@ -36,7 +70,10 @@ def analysis_args(**overrides):
         'root_cause': 'app.py:1 把 value 赋为 1',
         'trigger_paths': ['app.py:1'],
         'reproduction': {'command': '', 'test_files': [], 'not_reproducible_reason': '测试环境不运行真实页面'},
-        'proposals': [{'name': 'correct value', 'steps': ['把 value 改为 2']}],
+        'decision_questions': [], 'assumptions': [], 'verification_limits': [],
+        'acceptance_checks': [{'criterion_index': 0, 'method': 'manual', 'detail': '运行 app.py，确认 value 为 2', 'test_files': []}],
+        'proposals': [{'name': 'correct value', 'steps': ['把 value 改为 2'], 'files': ['app.py'],
+                       'impact': {'categories': [], 'evidence': 'app.py:1 修正赋值，不改变接口'}}],
     }
     args.update(overrides)
     return ('submit_analysis', args)

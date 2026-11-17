@@ -15,6 +15,7 @@ import {
   Popconfirm,
   AutoComplete,
   Tooltip,
+  Typography,
 } from 'antd';
 import {
   CheckCircleOutlined,
@@ -89,6 +90,7 @@ const LLMConfigPage: React.FC = () => {
   const [savingProvider, setSavingProvider] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [modelWindows, setModelWindows] = useState<Record<string, number>>({});
 
   const getProviderModelOptions = (providerId: string) => {
     const provider = config?.providers.find((item) => item.id === providerId);
@@ -187,12 +189,13 @@ const LLMConfigPage: React.FC = () => {
     }
     setFetchingModels(true);
     try {
-      const models = await llmConfigService.fetchModels({
+      const { models, context_windows = {} } = await llmConfigService.fetchModels({
         provider_id: editingProvider?.id,
         base_url: baseUrl,
         api_key: providerForm.getFieldValue('api_key'),
       });
       const current = providerForm.getFieldValue('default_model')?.trim();
+      setModelWindows((existing) => ({ ...context_windows, ...existing }));
       setModelOptions(models);
       providerForm.setFieldsValue({
         available_models: models,
@@ -209,6 +212,7 @@ const LLMConfigPage: React.FC = () => {
   const openProviderEditor = (provider: LLMProvider | null) => {
     setEditingProvider(provider);
     setModelOptions(provider?.available_models || []);
+    setModelWindows(provider?.context_windows || {});
     providerForm.resetFields();
     providerForm.setFieldsValue(
       provider
@@ -218,7 +222,6 @@ const LLMConfigPage: React.FC = () => {
             default_model: provider.default_model,
             available_models: provider.available_models,
             enabled: provider.enabled,
-            context_window_entries: Object.entries(provider.context_windows || {}).map(([model, tokens]) => ({ model, tokens })),
             stream_usage: provider.stream_usage ?? false,
           }
         : { enabled: true },
@@ -233,15 +236,9 @@ const LLMConfigPage: React.FC = () => {
     default_model: string;
     available_models?: string[];
     enabled?: boolean;
-    context_window_entries?: { model: string; tokens: number }[];
     stream_usage?: boolean;
   }) => {
     if (!config) return;
-    const windowEntries = values.context_window_entries || [];
-    if (new Set(windowEntries.map(({ model }) => model.trim())).size !== windowEntries.length) {
-      message.error('同一模型只能填写一个上下文窗口');
-      return;
-    }
     const apiKey = values.api_key?.trim() || '';
     if (!editingProvider && !apiKey) {
       message.error('请输入 API Key');
@@ -268,7 +265,7 @@ const LLMConfigPage: React.FC = () => {
       available_models: models,
       default_model: defaultModel,
       enabled: values.enabled ?? true,
-      context_windows: Object.fromEntries((values.context_window_entries || []).map(({ model, tokens }) => [model.trim(), tokens])),
+      context_windows: modelWindows,
       stream_usage: values.stream_usage ?? false,
     };
     const providers = editingProvider
@@ -624,21 +621,8 @@ const LLMConfigPage: React.FC = () => {
                         options={modelOptions.map((model) => ({ value: model }))}
                       />
                     </Form.Item>
-                    <Form.Item label="模型上下文窗口" extra="按提供商公布的窗口填写 tokens。未填写的模型使用服务端兼容估算，日志会标注为估算。">
-                      <Form.List name="context_window_entries">
-                        {(fields, { add, remove }) => <>
-                          {fields.map(({ key, name, ...field }) => <Space key={key} align="baseline">
-                            <Form.Item {...field} name={[name, 'model']} rules={[{ required: true, whitespace: true, message: '填写模型名' }]}>
-                              <AutoComplete placeholder="模型名称" options={modelOptions.map((model) => ({ value: model }))} style={{ width: 210 }} />
-                            </Form.Item>
-                            <Form.Item {...field} name={[name, 'tokens']} rules={[{ required: true, message: '填写窗口大小' }]}>
-                              <InputNumber min={8192} max={10000000} precision={0} placeholder="tokens" style={{ width: 150 }} />
-                            </Form.Item>
-                            <Button type="text" aria-label="移除模型窗口" icon={<DeleteOutlined />} onClick={() => remove(name)} />
-                          </Space>)}
-                          <Button type="dashed" onClick={() => add()} icon={<PlusOutlined />}>添加模型窗口</Button>
-                        </>}
-                      </Form.List>
+                    <Form.Item label="模型上下文窗口">
+                      <Typography.Text type="secondary">按所选模型自动应用内置配置，无需填写；提供商返回窗口信息时优先采用。</Typography.Text>
                     </Form.Item>
                     <Form.Item name="stream_usage" label="请求流式 token 用量" valuePropName="checked"
                       extra="仅在提供商支持 stream_options.include_usage 时开启；用于比较估算和真实消耗。">

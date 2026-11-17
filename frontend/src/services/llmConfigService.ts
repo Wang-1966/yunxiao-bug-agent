@@ -23,7 +23,7 @@ export const llmConfigService = {
   // 向提供商的 /models 接口查询可用模型
   async fetchModels(provider: { provider_id?: string; base_url: string; api_key?: string }) {
     const response = await api.post('/api/llm-config/models', provider);
-    return response.data.models as string[];
+    return response.data as { models: string[]; context_windows?: Record<string, number> };
   },
 
   // 预估成本

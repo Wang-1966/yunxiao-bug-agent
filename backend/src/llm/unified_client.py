@@ -111,7 +111,32 @@ class UnifiedLLMClient:
             tool_calls.append(call)
         return {'content': ''.join(content), 'tool_calls': tool_calls}
 
-    async def astream(
+    async def astream(self, messages, model, temperature=None, max_tokens=8000, diagnostics=None,
+                      log_context=None, on_reasoning=None, on_tool_delta=None, **kwargs):
+        """非 Pi 的截图识别等辅助模型请求也记录到 Langfuse。"""
+        import uuid
+        from ..core.observability import AgentTrace
+        trace = AgentTrace(run_id=uuid.uuid4().hex, agent_id=kwargs.pop('trace_agent_id', None),
+                           phase=kwargs.pop('trace_phase', 'auxiliary-llm'), model=model, secret=self.provider.api_key,
+                           metadata={'provider_id': self.provider.id, 'context': log_context, **kwargs.pop('trace_metadata', {})})
+        trace.start('request', name='model', kind='generation', input={'messages': messages, 'tools': kwargs.get('tools')})
+        diagnostics = diagnostics if diagnostics is not None else {}
+        output, error = '', None
+        try:
+            async for chunk in self._astream(messages, model, temperature, max_tokens, diagnostics=diagnostics,
+                log_context=log_context, on_reasoning=on_reasoning, on_tool_delta=on_tool_delta, **kwargs):
+                output = (output + chunk)[:20000]
+                yield chunk
+        except BaseException as exc:
+            error = type(exc).__name__
+            raise
+        finally:
+            usage = diagnostics.get('usage') or {}
+            trace.end('request', output=output, error=error, usage={'input': usage.get('input_tokens'),
+                      'output': usage.get('output_tokens'), 'input_cache_read': usage.get('cached_tokens')})
+            trace.finish('failed' if error else 'submitted')
+
+    async def _astream(
         self,
         messages: List[Dict[str, Any]],
         model: str,

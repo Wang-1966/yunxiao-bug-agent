@@ -23,10 +23,9 @@ def repository(tmp_path, monkeypatch):
 
 
 def edit(worktree, before, after):
-    files = Workspace(worktree, mode='fix')
-    files.read_file('app.py')
-    files.edit_file('app.py', before, after)
-    return files
+    path = Path(worktree) / 'app.py'
+    path.write_text(path.read_text().replace(before, after))
+
 
 
 @pytest.mark.asyncio
@@ -149,16 +148,17 @@ def test_attempt_prompt_is_bounded():
 
 
 def test_edit_requires_a_read_and_rejects_business_files_during_analysis(repository):
-    fixing = Workspace(repository, mode='fix')
-    with pytest.raises(ToolError, match='read_file'):
-        fixing.edit_file('app.py', 'value = 1', 'value = 2')
-    files = Workspace(repository, mode='analyze')
-    files.read_file('app.py')
+    from src.core.pi_tools import PiTools
+    fixing = PiTools(Workspace(repository, mode='fix'), [])
+    with pytest.raises(ToolError, match='read'):
+        fixing.permit('edit', {'path': 'app.py'})
+    fixing.completed('read', {'path': str(repository / 'app.py')})
+    assert fixing.permit('edit', {'path': 'app.py'})['path'] == str(repository / 'app.py')
+    analyzing = PiTools(Workspace(repository, mode='analyze'), [])
     with pytest.raises(ToolError, match='业务源码'):
-        files.edit_file('app.py', 'value = 1', 'value = 2')
-    assert (repository / 'app.py').read_text().startswith('value = 1')
-    files.edit_file('test_repro.py', '', 'assert False\n')
-    assert (repository / 'test_repro.py').read_text() == 'assert False\n'
+        analyzing.permit('write', {'path': 'app.py'})
+    assert analyzing.permit('write', {'path': 'test_repro.py'})['path'].endswith('test_repro.py')
+
 
 
 @pytest.mark.asyncio

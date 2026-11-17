@@ -26,6 +26,7 @@ tree-sitter==0.23.2
 
 # Logging
 loguru==0.7.2
+langfuse==5.2.0
 
 # 预览页核对（需本机 Chrome，或再执行 python -m playwright install chromium）
 playwright==1.49.1

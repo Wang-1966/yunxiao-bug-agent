@@ -339,6 +339,9 @@ async def test_real_workflow_requires_repository_before_model_calls(task_db):
 
 
 async def run_verified_repair(task_db, tmp_path, monkeypatch, command=None):
+    from src.core import confirmation_manager
+    from src.models.confirmation_config import ConfirmationConfig
+    monkeypatch.setattr(confirmation_manager, 'load_confirmation_config', lambda: ConfirmationConfig(mode='always'))
     repo = tmp_path / 'source'
     repo.mkdir()
     (repo / 'app.py').write_text('value = 1\nassert value == 2\n')
@@ -382,7 +385,7 @@ async def test_item_acceptance_is_persisted_and_failed_items_reach_next_round(ta
         current = await agents.get_agent(agent_id)
         assert current.attention['kind'] == 'acceptance'
         report = current.acceptance
-        assert report['criteria'] and report['legacy'] is True
+        assert report['criteria'] and report['legacy'] is False
         request = {'confirmed': confirmed, 'acceptance_version': report['version'], 'git_commit_hash': current.git_commit_hash,
                    'acceptance_results': [{'criterion_id': item['id'], 'status': 'passed' if confirmed else 'failed',
                                            'feedback': '' if confirmed else '第二次保存仍失败'} for item in report['criteria']]}

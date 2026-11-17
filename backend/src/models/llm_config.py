@@ -15,7 +15,7 @@ class LLMProvider(BaseModel):
     available_models: list[str] = Field(..., description="可用模型列表")
     default_model: str = Field(..., description="默认模型")
     enabled: bool = Field(default=True, description="是否启用")
-    context_windows: dict[str, int] = Field(default_factory=dict, description="模型上下文窗口 tokens；未填写使用兼容估算")
+    context_windows: dict[str, int] = Field(default_factory=dict, description="提供商返回或管理员覆盖的模型窗口；默认使用内置模型配置与 Pi 目录，用户无需填写")
     stream_usage: bool = Field(default=False, description='提供商支持在流式响应返回 usage 时启用')
 
     @field_validator('context_windows')

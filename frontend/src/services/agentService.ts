@@ -71,7 +71,7 @@ export const agentService = {
 
   async conversation(agentId: string) {
     return (await api.get(`/api/agents/${encodeURIComponent(agentId)}/conversation`)).data as {
-      messages: ConversationMessage[]; discussing: boolean; engine: 'native' | 'pi'; status: string; can_send: boolean; assigned_agent_id?: string | null;
+      messages: ConversationMessage[]; discussing: boolean; engine: 'pi'; status: string; can_send: boolean; assigned_agent_id?: string | null;
       repair_summary?: RepairSummary | null; outcome?: string | null;
     };
   },

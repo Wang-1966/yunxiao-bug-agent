@@ -7,6 +7,7 @@ import { createAgentSession, DefaultResourceLoader, loadProjectContextFiles, loa
   createReadToolDefinition, createEditToolDefinition, createWriteToolDefinition, createBashToolDefinition,
   createFindToolDefinition, createLsToolDefinition } from '@earendil-works/pi-coding-agent';
 import { compactionMetric, estimateInput } from './context-metrics.mjs';
+import { resolveModelContext } from './model-context.mjs';
 
 process.umask(0o077);
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\n');
@@ -89,17 +90,17 @@ function images(urls = []) {
 async function start(config) {
   mkdirSync(dirname(config.session), { recursive: true, mode: 0o700 });
   const runtime = await ModelRuntime.create({ authPath: config.session + '.auth', modelsPath: config.session + '.models' });
+  const capabilities = resolveModelContext(runtime, config);
+  send({ type: 'model_context', ...capabilities });
   runtime.registerProvider('yunxiao', {
     baseUrl: config.baseUrl,
     api: 'openai-completions',
     apiKey: config.apiKey,
     models: [{ id: config.model, name: config.model, reasoning: false, input: ['text', 'image'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: config.contextWindow, maxTokens: config.maxTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: capabilities.contextWindow, maxTokens: config.maxTokens,
       compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false, maxTokensField: 'max_tokens' } }],
   });
-  const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 3 }, compaction: {
-    enabled: true, reserveTokens: config.reserveTokens, keepRecentTokens: config.keepRecentTokens,
-  } });
+  const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 3 }, compaction: { enabled: true } });
   const discovered = loadSkills({ cwd: config.cwd, agentDir: dirname(config.session),
     skillPaths: config.skillPaths, includeDefaults: false });
   const contextFiles = loadProjectContextFiles({ cwd: config.cwd, agentDir: dirname(config.session) });
@@ -142,17 +143,15 @@ async function start(config) {
     const id = ++requestId;
     const started = Date.now();
     send({ type: 'context_metric', event: 'request_start', turn, request_id: id,
-      request_kind: compactionStarted ? 'summary' : 'agent', estimated_input_tokens: estimated, input_limit: config.inputLimit });
-    // Pi handles overflow with one compact-and-retry. Reject locally before sending an oversized request.
-    if (estimated > config.inputLimit) {
-      send({ type: 'context_metric', event: 'budget_blocked', turn, estimated_input_tokens: estimated, input_limit: config.inputLimit });
-      throw new Error('Context length exceeds configured input budget');
-    }
+      request_kind: compactionStarted ? 'summary' : 'agent', estimated_input_tokens: estimated,
+      ...(config.observe ? { input: { system: context.systemPrompt, messages: context.messages, tools: context.tools } } : {}) });
+    // Estimates are telemetry only. Pi owns proactive compaction and overflow recovery.
     const output = await streamModel(model, context, {
-      ...options, maxTokens: config.maxTokens, ...(config.temperature == null ? {} : { temperature: config.temperature }),
+      ...options, ...(config.temperature == null ? {} : { temperature: config.temperature }),
     });
     void output.result().then((message) => send({ type: 'context_metric', event: 'request_end', turn, request_id: id,
       duration_ms: Date.now() - started, status: message.stopReason === 'error' ? 'failed' : message.stopReason === 'aborted' ? 'cancelled' : 'completed',
+      ...(config.observe ? { output: message.content, error: message.errorMessage } : {}),
       usage: message.usage ? {
         input_tokens: message.usage.input + message.usage.cacheRead + message.usage.cacheWrite,
         output_tokens: message.usage.output, cached_tokens: message.usage.cacheRead, total_tokens: message.usage.totalTokens,

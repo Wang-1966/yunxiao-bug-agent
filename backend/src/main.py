@@ -71,6 +71,8 @@ async def lifespan(app: FastAPI):
         finally:
             await stop_all()
             await asyncio.gather(sync_task, return_exceptions=True)
+            from .core.observability import shutdown
+            await asyncio.to_thread(shutdown)
 
 
 app = FastAPI(

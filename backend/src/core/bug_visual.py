@@ -30,7 +30,8 @@ async def describe_bug_images(llm, bug):
         ]},
     ]
     try:
-        response = await asyncio.wait_for(llm.ainvoke(messages, temperature=0.0, response_format={'type': 'json_object'}), timeout=120)
+        response = await asyncio.wait_for(llm.ainvoke(messages, temperature=0.0, response_format={'type': 'json_object'}, log_context='vision',
+            trace_agent_id=bug.get('assigned_agent_id'), trace_phase='vision', trace_metadata={'bug_id': bug.get('id')}), timeout=120)
     except asyncio.TimeoutError as exc:
         raise ValueError('截图识别请求超过 120 秒') from exc
     observations = parse_json(response).get('images')

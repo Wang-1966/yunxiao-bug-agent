@@ -1,4 +1,4 @@
-"""两个执行内核共用工具、阶段约束与对话消息；同一任务禁止重入。"""
+"""Pi 执行入口：宿主提供业务工具、阶段约束与对话消息，同一任务禁止重入。"""
 import asyncio
 import time
 from dataclasses import replace
@@ -6,7 +6,7 @@ from dataclasses import replace
 from ..config import get_settings
 from . import conversation
 from .agent_tools import Tool, ToolError
-from .tool_agent import run_tool_agent as run_native_agent
+from .pi_agent import run_pi_agent
 
 
 async def run_tool_agent(llm, messages, tools, **kwargs):
@@ -58,11 +58,7 @@ async def run_tool_agent(llm, messages, tools, **kwargs):
             tracked_tools.append(replace(tool, handler=tracked))
         tools = tracked_tools
     try:
-        from .runtime_config import engine
-        if engine() == 'pi':
-            from .pi_agent import run_pi_agent
-            return await run_pi_agent(llm, messages, tools, **kwargs)
-        return await run_native_agent(llm, messages, tools, **kwargs)
+        return await run_pi_agent(llm, messages, tools, **kwargs)
     finally:
         if agent_id:
             async with conversation.lock_for(agent_id):

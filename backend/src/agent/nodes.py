@@ -66,7 +66,7 @@ def agent_preview(state):
 def review_bug(state):
     """审查员使用的 Bug 材料：与分析/修复看到的症状输入一致。"""
     bug = state['bug_info']
-    return {'title': bug['title'], 'description': bug.get('description') or '', 'feedback': feedback_text(state),
+    return {'id': bug.get('id'), 'title': bug['title'], 'description': bug.get('description') or '', 'feedback': feedback_text(state),
             'previous_attempt': attempt_prompt(state.get('previous_attempt'))}
 
 

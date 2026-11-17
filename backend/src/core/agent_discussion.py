@@ -11,7 +11,7 @@ from . import conversation
 from .agent_tools import ToolError, Workspace, build_tools
 from .agent_stream import ThinkingStream
 from .agent_runtime import run_tool_agent
-from .tool_agent import submit_tool
+from .agent_protocol import submit_tool
 from ..llm.factory import LLMFactory
 
 tasks = {}
@@ -182,7 +182,7 @@ async def discuss(agent_id):
                       '4. 多个方案而用户没指明选哪个时，选 none 并反问。\n'
                       '5. reply 用一两句话说明你的理解与即将执行的动作（例如“判断为验收通过，开始合并到修复分支并清理工作树”），不要声称已经完成；action=none 时正常回答。\n'
                       '可以读取源码辅助判断，但不修改代码。')
-        tools = build_tools(workspace, commands=False) + [submit_tool('submit_reply', '提交给用户的回复' + ('与下一步动作。' if actions else '，不批准或执行代码修改。'),
+        tools = build_tools(workspace) + [submit_tool('submit_reply', '提交给用户的回复' + ('与下一步动作。' if actions else '，不批准或执行代码修改。'),
             {'type': 'object', 'properties': properties, 'required': ['reply'] + (['action'] if actions else [])}, reply)]
         context = {key: saved.get(key) for key in ('root_cause', 'analysis', 'proposals', 'fix_summary', 'repair_summary', 'test_results', 'error')}
         payload = {'bug': row['title'], 'description': row['description'], 'status': row['status'], 'context': context,

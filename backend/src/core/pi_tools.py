@@ -2,18 +2,19 @@
 from .agent_tools import (COMMAND_DEFAULT_TIMEOUT, COMMAND_MAX_TIMEOUT,
                           ToolError, command_env, effective_denies, sandbox_profile)
 
-REPLACEMENTS = {'read_file': ('read',), 'list_dir': ('ls',), 'find_files': ('find',),
-                'edit_file': ('edit', 'write'), 'apply_patch': ('edit', 'write'), 'run_command': ('bash',)}
 READ_TOOLS = {'read', 'find', 'ls'}
 
 
 class PiTools:
-    def __init__(self, workspace, tools):
+    def __init__(self, workspace, tools, *, commands=True):
         self.workspace = workspace
-        # Pi grep 的 rg 子进程没有执行钩子；进程沙箱拦截 .env 后会使整次搜索失败。
-        # 复用既有受控 grep，其他通用工具全部使用 SDK 实现。
-        self.names = list(dict.fromkeys(name for tool in tools for name in REPLACEMENTS.get(tool.name, ())))
-        self.host_tools = [tool for tool in tools if tool.name not in REPLACEMENTS]
+        self.names = ['read', 'ls', 'find']
+        if workspace.mode != 'read':
+            self.names += ['edit', 'write']
+            if commands:
+                self.names.append('bash')
+        self.host_tools = tools
+
 
     def config(self):
         workspace = self.workspace

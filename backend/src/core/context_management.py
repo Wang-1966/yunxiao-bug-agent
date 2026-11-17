@@ -1,21 +1,19 @@
-"""共享上下文预算、任务内证据和可汇总的运行指标；日志不保存消息正文。"""
+"""任务内证据和运行指标；上下文压缩由 Pi 管理，日志不保存消息正文。"""
 import asyncio
 import hashlib
 import json
-import math
 import os
 import re
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import get_settings
 from .agent_tools import Tool, ToolError, clip_output
 
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 MAX_EVIDENCE_CHARS = 2_000_000
 TOOL_PREVIEW_CHARS = 16_000
 
@@ -39,65 +37,24 @@ def context_directory(worktree) -> Path:
     return data / 'agent_context' / f'{Path(worktree).name}-{identity}'
 
 
-def estimate_tokens(value) -> int:
-    """无 tokenizer 时的保守估算；图片按高分辨率预留，不按 base64 字符计费。"""
-    if isinstance(value, str):
-        ascii_chars = sum(ord(char) < 128 for char in value)
-        return math.ceil(ascii_chars / 3) + (len(value) - ascii_chars) * 2
-    if isinstance(value, list):
-        return sum(estimate_tokens(item) + 4 for item in value)
-    if isinstance(value, dict):
-        if value.get('type') in ('image_url', 'image'):
-            return 4096
-        return sum(estimate_tokens(key) + estimate_tokens(item) + 2 for key, item in value.items())
-    return 4 if value is not None else 0
-
-
-@dataclass(frozen=True)
-class ContextBudget:
-    window: int
-    output: int
-    reserve: int
-    source: str
-
-    @classmethod
-    def for_llm(cls, llm):
-        provider = getattr(getattr(llm, 'client', None), 'provider', None)
-        windows = getattr(provider, 'context_windows', {}) or {}
-        configured = windows.get(getattr(llm, 'model', ''))
-        window = configured or get_settings().agent_context_window
-        output = (getattr(llm, 'defaults', {}) or {}).get('max_tokens', 16000)
-        reserve = max(4096, math.ceil(window * 0.08))
-        if window - output - reserve < 4096:
-            raise ValueError('模型上下文窗口不足以容纳输出预留；请调整上下文窗口或最大输出 tokens')
-        return cls(window, output, reserve, 'configured' if configured else 'fallback_estimate')
-
-    @property
-    def limit(self):
-        return self.window - self.output - self.reserve
-
-    @property
-    def trigger(self):
-        return int(self.limit * 0.8)
-
-    @property
-    def target(self):
-        return int(self.limit * 0.55)
-
-
 class ContextRun:
-    def __init__(self, workspace, *, engine, phase, llm, agent_id=None):
+    def __init__(self, workspace, *, engine, phase, llm, agent_id=None, trace_metadata=None):
         self.workspace = workspace
         self.directory = context_directory(workspace.root)
         self.run_id = uuid.uuid4().hex
         self.engine, self.phase, self.agent_id = engine, phase, agent_id
         self.model = getattr(llm, 'model', 'unknown')
         self.provider = getattr(getattr(llm, 'client', None), 'provider', None)
-        self.budget = ContextBudget.for_llm(llm)
+        configured_window = (getattr(self.provider, 'context_windows', {}) or {}).get(self.model)
+        self.context_window = configured_window
         self.started = time.monotonic()
         self.log_path = self.directory / 'runs' / f'{self.run_id}.jsonl'
-        self.emit('run_start', context_window=self.budget.window, output_budget=self.budget.output,
-                  input_limit=self.budget.limit, window_source=self.budget.source)
+        from .observability import AgentTrace
+        self.trace = AgentTrace(run_id=self.run_id, agent_id=agent_id, phase=phase, model=self.model,
+                                secret=getattr(self.provider, 'api_key', ''), metadata=trace_metadata)
+        self.emit('run_start', context_window=self.context_window,
+                  output_budget=(getattr(llm, 'defaults', {}) or {}).get('max_tokens', 16000),
+                  window_source='configured' if configured_window else 'pending_pi_catalog')
 
     def emit(self, event, **metrics):
         # Callers supply counts, IDs and enums only, never prompts, arguments or exceptions.
@@ -149,6 +106,7 @@ class ContextRun:
     def begin_tool(self, name, call_id, args, *, readonly):
         """宿主工具和 Pi 原生工具共用同一条证据链。"""
         execution_id = uuid.uuid4().hex
+        self.trace.start(execution_id, name=name, kind='tool', input=args, metadata={'call_id': call_id, 'readonly': readonly})
         args_hash = hashlib.sha256(json.dumps(args, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         self.emit('tool_start', execution_id=execution_id, call_id=call_id, tool=name, readonly=readonly, args_sha256=args_hash)
         return dict(execution_id=execution_id, name=name, call_id=call_id, args=args, started=time.monotonic())
@@ -159,6 +117,8 @@ class ContextRun:
         self.emit('tool_end', execution_id=execution['execution_id'], tool=execution['name'], status=status,
                   evidence_id=evidence_id, duration_ms=round((time.monotonic() - execution['started']) * 1000),
                   **({'error_type': error_type} if error_type else {}))
+        self.trace.end(execution['execution_id'], output=text, error=error_type or (status if status != 'completed' else None),
+                       metadata={'evidence_id': evidence_id})
         return evidence_id
 
     async def execute(self, tool, call_id, args):
@@ -217,4 +177,5 @@ class ContextRun:
                      'limit': {'type': 'integer'}, 'query': {'type': 'string'}}}, read)
 
     def finish(self, status):
+        self.trace.finish(status)
         self.emit('run_end', status=status, duration_ms=round((time.monotonic() - self.started) * 1000))

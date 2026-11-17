@@ -1,4 +1,4 @@
-// Same conservative fallback as Python. Provider usage is logged separately for calibration.
+// Telemetry only: this conservative estimate never rejects requests or controls compaction.
 export function estimateInput(value) {
   if (typeof value === 'string') {
     let ascii = 0;

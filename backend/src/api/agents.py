@@ -20,7 +20,7 @@ from ..core.orchestrator import get_orchestrator
 from ..core.agent_stream import live_stream, tool_activity
 from ..core.projects import resolve_project_config, project_configuration_lock
 from ..core.preview_manager import start_preview, stop_preview, preview_status
-from ..core.tool_agent import repair_unicode_escapes
+from ..core.agent_protocol import repair_unicode_escapes
 from ..core.acceptance import evidence_report
 from ..core.attention import attention_item
 from ..core.repair_summary import repair_summary
@@ -37,7 +37,6 @@ def get_db_path() -> str:
 @router.get('/{agent_id}/conversation')
 async def get_conversation(agent_id: str):
     from ..core import conversation, agent_discussion
-    from ..core.runtime_config import engine
     try:
         items = await conversation.messages(agent_id, load_images=False)
         for item in items:
@@ -59,7 +58,7 @@ async def get_conversation(agent_id: str):
                 outcome = '本轮执行未完成，可继续对话处理'
             elif row[0] == 'idle':
                 outcome = '修复已验收并交付' if row[2] == 'resolved' else '本轮执行已结束'
-        return {'messages': items, 'discussing': agent_discussion.busy(agent_id), 'engine': engine(),
+        return {'messages': items, 'discussing': agent_discussion.busy(agent_id), 'engine': 'pi',
                 'status': row[0] if row else 'idle', 'can_send': bool(row and row[1] == agent_id),
                 'assigned_agent_id': row[1] if row else None,
                 'repair_summary': summary, 'outcome': outcome}

@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import AgentRuntimeSettings from './AgentRuntimeSettings';
 import {
   Card,
   Radio,
@@ -147,7 +146,6 @@ export const ConfirmationSettings: React.FC = () => {
         </p>
       </div>
 
-      <AgentRuntimeSettings />
       {/* 确认模式选择 */}
       <Card style={{ marginBottom: 24 }}>
         <h3 style={{ marginBottom: 16 }}>确认模式</h3>

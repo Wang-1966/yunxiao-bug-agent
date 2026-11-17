@@ -1,3 +1,5 @@
+> 历史设计记录：项目现已统一为 Pi 执行路径，文中 Python 工具循环与压缩实现已删除。当前说明见 [Pi 执行内核](pi-conversation.md) 和 [Langfuse 运维说明](../../infra/langfuse/README.md)。
+
 # 上下文管理改造方案
 
 状态：长期目标方案。v1 已实现证据回查、原生压缩失败保护/执行边界检查点、模型窗口配置及双内核指标日志；完整落地范围、未完成项与下一轮优化入口见 [运行说明](context-management-operations.md)。尚未切换默认内核或迁移旧任务。

@@ -194,6 +194,20 @@ def parse_model_ids(payload) -> list[str]:
     return sorted(set(ids), key=str.lower)
 
 
+def parse_model_windows(payload) -> dict[str, int]:
+    """只使用提供商明确返回的窗口，不从模型名或最大输出长度推算。"""
+    items = payload.get('data') or payload.get('models') or [] if isinstance(payload, dict) else payload
+    windows: dict[str, set[int]] = {}
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        names = parse_model_ids([item])
+        window = item.get('context_window') or item.get('context_length')
+        if names and type(window) is int and 8192 <= window <= 10_000_000:
+            windows.setdefault(names[0], set()).add(window)
+    return {name: next(iter(values)) for name, values in windows.items() if len(values) == 1}
+
+
 @router.post("/models")
 async def fetch_models(request: ModelListRequest):
     """向提供商的 `/models` 接口查询可用模型。未提交 Key 时使用已保存的 Key。"""
@@ -210,7 +224,9 @@ async def fetch_models(request: ModelListRequest):
         async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0), follow_redirects=True) as client:
             response = await client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
         response.raise_for_status()
-        models = parse_model_ids(response.json())
+        payload = response.json()
+        models = parse_model_ids(payload)
+        windows = parse_model_windows(payload)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"获取模型列表失败：HTTP {e.response.status_code}")
     except (httpx.HTTPError, ValueError) as e:
@@ -218,7 +234,7 @@ async def fetch_models(request: ModelListRequest):
         raise HTTPException(status_code=502, detail="获取模型列表失败：无法连接或返回格式不正确")
     if not models:
         raise HTTPException(status_code=502, detail="该提供商没有返回任何模型")
-    return {"models": models}
+    return {"models": models, **({'context_windows': windows} if windows else {})}
 
 
 @router.post("/estimate")

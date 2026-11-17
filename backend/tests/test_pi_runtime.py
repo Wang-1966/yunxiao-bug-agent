@@ -15,7 +15,7 @@ import pytest
 from src.config import get_settings
 from src.core.agent_tools import Workspace, build_tools
 from src.core.pi_agent import run_pi_agent
-from src.core.tool_agent import submit_tool
+from src.core.agent_protocol import submit_tool
 
 
 @pytest.fixture
@@ -52,7 +52,7 @@ def pi_script(tmp_path, monkeypatch):
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         llm = SimpleNamespace(client=SimpleNamespace(provider=SimpleNamespace(
-            base_url=f'http://127.0.0.1:{server.server_port}/v1', api_key='test-only-secret')),
+            base_url=f'http://127.0.0.1:{server.server_port}/v1', api_key='test-only-secret', context_windows={'test-model': 64000})),
             model='test-model', defaults={'max_tokens': 2048})
         try:
             yield llm, requests
@@ -144,7 +144,7 @@ async def test_native_phase_restrictions_and_project_skills(tmp_path, pi_script)
              ('submit_reply', {'reply': 'done'})]
     with pi_script(calls) as (llm, requests):
         await run_pi_agent(llm, [{'role': 'system', 'content': '调查'}, {'role': 'user', 'content': '分析'}],
-                           build_tools(workspace, commands=False) + [reply_tool()], workspace=workspace)
+                           build_tools(workspace) + [reply_tool()], workspace=workspace)
     assert (root / 'app.py').read_text() == 'value = 1\n'
     assert (root / 'test_added.py').read_text() == 'assert False\n'
     history = json.dumps(requests[-1], ensure_ascii=False)
@@ -162,7 +162,7 @@ async def test_native_readonly_cannot_call_write_or_bash(tmp_path, pi_script):
     workspace = Workspace(root, mode='read')
     with pi_script(calls) as (llm, requests):
         await run_pi_agent(llm, [{'role': 'system', 'content': '只读讨论'}, {'role': 'user', 'content': '解释'}],
-                           build_tools(workspace, commands=False) + [reply_tool()], workspace=workspace)
+                           build_tools(workspace) + [reply_tool()], workspace=workspace)
     assert not (root / 'forbidden.py').exists()
     names = {tool['function']['name'] for tool in requests[0]['tools']}
     assert not names & {'write', 'edit', 'bash'}
@@ -175,7 +175,7 @@ async def test_native_submit_blocks_later_writes_in_same_turn(tmp_path, pi_scrip
     workspace = Workspace(root, mode='fix')
     with pi_script([[('submit_reply', {'reply': 'done'}), ('write', {'path': 'late.py', 'content': 'wrong'})]]) as (llm, _):
         assert await run_pi_agent(llm, [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'task'}],
-            build_tools(workspace, commands=False) + [reply_tool()], workspace=workspace) == ('submit_reply', 'done')
+            build_tools(workspace) + [reply_tool()], workspace=workspace) == ('submit_reply', 'done')
     assert not (root / 'late.py').exists()
 
 
@@ -197,7 +197,7 @@ async def test_native_images_truncation_and_secret_redaction(tmp_path, pi_script
              ('read', {'path': 'key.txt'}), ('submit_reply', {'reply': 'done'})]
     with pi_script(calls) as (llm, requests):
         await run_pi_agent(llm, [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'task'}],
-            build_tools(workspace, commands=False) + [reply_tool()], workspace=workspace)
+            build_tools(workspace) + [reply_tool()], workspace=workspace)
     history = json.dumps(requests[-1])
     assert 'data:image/png;base64,' in history and '[REDACTED]' in history
     assert 'test-only-secret' not in history
@@ -214,7 +214,6 @@ async def test_native_analysis_then_fix_uses_real_reproduction(tmp_path, pi_scri
     from src.core.repair_agent import repository_context, run_analysis, run_fix
     if not sandbox_available():
         pytest.skip('需要命令沙箱运行真实复现')
-    monkeypatch.setattr(get_settings(), 'agent_engine', 'pi')
     root = tmp_path / 'repo'
     root.mkdir()
     (root / 'app.py').write_text('value = 1\n')
@@ -240,7 +239,7 @@ async def test_native_analysis_then_fix_uses_real_reproduction(tmp_path, pi_scri
     original_test = (root / 'test_repro.py').read_bytes()
     with pi_script([('read', {'path': 'app.py'}),
                     ('edit', {'path': 'app.py', 'edits': [{'oldText': 'value = 1', 'newText': 'value = 2'}]}),
-                    ('submit_fix', {'summary': '修正 value 赋值'})]) as (llm, requests):
+                    ('submit_fix', {'summary': '修正 value 赋值', 'repair_summary': {'root_cause': '赋值错误', 'solution': '已修正赋值'}})]) as (llm, requests):
         result = await run_fix(llm, None, root, '将 value 修复为 2', bug={},
                                analysis=analysis['analysis'], repro=analysis['repro'])
     assert result['repro']['exit_after'] == 0
@@ -298,7 +297,7 @@ async def test_real_pi_tool_bridge_and_persistent_resume(tmp_path, pi_script):
     worktree.mkdir()
     (worktree / 'app.txt').write_text('persistent context evidence')
     workspace = Workspace(worktree, mode='read')
-    tools = build_tools(workspace, commands=False) + [reply_tool()]
+    tools = build_tools(workspace) + [reply_tool()]
     with pi_script([('read', {'path': 'app.txt'}), ('submit_reply', {'reply': '已读取并保留上下文'})]) as (llm, requests):
         llm.defaults['temperature'] = 0.2
         result = await run_pi_agent(llm, [{'role': 'system', 'content': '请用工具'}, {'role': 'user', 'content': '读取 app.txt 并回复'}], tools, workspace=workspace, max_turns=5)
@@ -324,10 +323,10 @@ async def test_real_pi_tool_bridge_and_persistent_resume(tmp_path, pi_script):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('summary_failure', [False, True])
-async def test_real_pi_compaction_outcome_is_logged(tmp_path, monkeypatch, summary_failure):
+@pytest.mark.parametrize(('trigger', 'summary_failure'), [('threshold', False), ('threshold', True), ('overflow', False)])
+async def test_real_pi_compaction_outcome_is_logged(tmp_path, monkeypatch, trigger, summary_failure):
     import subprocess
-    from src.core.tool_agent import session_path
+    from src.core.agent_protocol import session_path
     from src.core.context_management import context_directory
     monkeypatch.setattr(get_settings(), 'database_url', f'sqlite+aiosqlite:///{tmp_path}/tasks.db')
     worktree = tmp_path / 'repo'
@@ -338,21 +337,31 @@ async def test_real_pi_compaction_outcome_is_logged(tmp_path, monkeypatch, summa
       import { SessionManager } from '@earendil-works/pi-coding-agent';
       const manager = SessionManager.open(process.argv[1], undefined, process.argv[2]);
       for (let i = 0; i < 5; i++) {
-        manager.appendMessage({ role: 'user', content: [{ type: 'text', text: 'historical evidence ' + 'x'.repeat(10000) }], timestamp: Date.now() });
+        manager.appendMessage({ role: 'user', content: [{ type: 'text', text: 'historical evidence ' + 'x'.repeat(20000) }], timestamp: Date.now() });
         manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Investigated; preserve user constraints.' }],
           api: 'openai-completions', provider: 'yunxiao', model: 'test-model', timestamp: Date.now(), stopReason: 'stop',
-          usage: { input: 23000, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 23010,
+          usage: { input: Number(process.argv[3]), output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: Number(process.argv[3]) + 10,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
       }
     '''
-    subprocess.run([get_settings().pi_node_command, '--input-type=module', '-e', seed, str(path), str(worktree)],
+    subprocess.run([get_settings().pi_node_command, '--input-type=module', '-e', seed, str(path), str(worktree),
+                    '23000' if trigger == 'threshold' else '100'],
                    cwd=Path(__file__).resolve().parents[1] / 'pi', check=True, capture_output=True)
-    summaries = []
+    summaries, agent_requests = [], []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             is_summary = not request.get('tools')
+            if not is_summary:
+                agent_requests.append(request)
+                if trigger == 'overflow' and len(agent_requests) == 1:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': {'message': 'maximum context length is 32000 tokens',
+                                                           'type': 'invalid_request_error', 'code': 'context_length_exceeded'}}).encode())
+                    return
             if is_summary:
                 summaries.append(request)
                 delta = {'role': 'assistant', 'content': 'Goal: preserve constraints. Progress: inspected. Next: verify. Evidence remains available.'}
@@ -385,9 +394,54 @@ async def test_real_pi_compaction_outcome_is_logged(tmp_path, monkeypatch, summa
         events = [json.loads(line) for file in context_directory(worktree).glob('runs/*.jsonl') for line in file.read_text().splitlines()]
         compact = [event for event in events if event['event'] == 'compaction']
         assert compact and compact[0]['status'] == ('failed' if summary_failure else 'success')
+        assert compact[0]['reason'] == trigger
+        assert not any(event['event'] == 'budget_blocked' for event in events)
+        if trigger == 'overflow':
+            assert len(agent_requests) >= 2
+            assert compact[0]['will_retry']
         entries = [json.loads(line) for line in path.read_text().splitlines()]
         assert any(entry['type'] == 'compaction' for entry in entries) is (not summary_failure)
         assert any('historical evidence' in json.dumps(entry) for entry in entries)
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.asyncio
+async def test_pi_does_not_reject_request_from_host_token_estimate(tmp_path, pi_script):
+    root = tmp_path / 'repo'
+    root.mkdir()
+    with pi_script([('submit_reply', {'reply': 'done'})]) as (llm, requests):
+        llm.client.provider.context_windows = {'test-model': 32000}
+        # A conservative character estimate exceeds the former 25,856 input limit.
+        # Only the model service and Pi determine whether compression is needed.
+        result = await run_pi_agent(llm, [{'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'x' * 79000}], [reply_tool()], workspace=Workspace(root))
+        assert result == ('submit_reply', 'done')
+        assert requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('model', 'source'), [('gpt-4.1', 'pi_catalog'), ('gpt-6.1-sol', 'project_default')])
+async def test_pi_resolves_catalog_window_and_rejects_unknown_before_model_request(tmp_path, pi_script, model, source):
+    from src.core.context_management import context_directory
+    with pi_script([('submit_reply', {'reply': 'done'})]) as (llm, requests):
+        llm.client.provider.context_windows = {}
+        llm.client.provider.id = 'openai'
+        llm.model = model
+        root = tmp_path / 'known'
+        root.mkdir()
+        assert await run_pi_agent(llm, [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'task'}],
+                                  [reply_tool()], workspace=Workspace(root)) == ('submit_reply', 'done')
+        events = [json.loads(line) for file in context_directory(root).glob('runs/*.jsonl') for line in file.read_text().splitlines()]
+        capability = next(event for event in events if event['event'] == 'model_context')
+        assert capability['window_source'] == source
+        assert capability['context_window'] > 128000
+        request_count = len(requests)
+        llm.model = 'unknown-model'
+        unknown = tmp_path / 'unknown'
+        unknown.mkdir()
+        with pytest.raises(ValueError, match='暂未收录.*unknown-model.*上下文窗口'):
+            await run_pi_agent(llm, [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'task'}],
+                               [reply_tool()], workspace=Workspace(unknown))
+        assert len(requests) == request_count

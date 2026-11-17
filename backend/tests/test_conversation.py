@@ -13,7 +13,7 @@ from src.core import conversation, agent_discussion, orchestrator
 from src.core.agent_stream import ThinkingStream
 from src.core.agent_tools import Workspace
 from src.core.agent_runtime import run_tool_agent
-from src.core.tool_agent import submit_tool
+from src.core.agent_protocol import submit_tool
 from src.models.agent import ConversationMessageRequest, ProposalConfirmation
 from fake_agent import ScriptedLLM, turn
 
@@ -27,7 +27,6 @@ async def chat_db(tmp_path, monkeypatch):
         await db.execute("INSERT INTO agents (agent_id, name, status, current_bug_id) VALUES ('agent', 'Agent', 'busy', 'bug')")
         await db.commit()
     monkeypatch.setattr(get_settings(), 'database_url', f'sqlite+aiosqlite:///{path}')
-    monkeypatch.setattr(get_settings(), 'agent_engine', 'native')
     monkeypatch.setattr(agents, 'get_db_path', lambda: str(path))
     runner = orchestrator.MultiAgentOrchestrator()
     monkeypatch.setattr(agents, 'get_orchestrator', lambda: runner)
@@ -136,53 +135,10 @@ async def test_continue_with_stopped_scheduler_reports_failure(chat_db, monkeypa
     assert len(await conversation.pending('agent')) == 1
 
 
-@pytest.mark.asyncio
-async def test_receives_message_before_submit(chat_db, tmp_path):
-    await conversation.add_user('agent', ConversationMessageRequest(text='Delete 保持现状', client_id='client-1'))
-    async def accept(args):
-        return args
-    terminal = submit_tool('submit_fix', '提交', {'type': 'object', 'properties': {}}, accept)
-    llm = ScriptedLLM([turn(('submit_fix', {}))])
-    result = await run_tool_agent(llm, [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'task'}], [terminal], stream=ThinkingStream('agent', AsyncMock()), workspace=Workspace(tmp_path))
-    assert result[0] == 'submit_fix'
-    assert 'Delete 保持现状' in json.dumps(llm.calls[0]['messages'], ensure_ascii=False)
-    assert not await conversation.pending('agent') and not conversation.active
 
 
-@pytest.mark.asyncio
-async def test_message_during_validation_prevents_stale_submit(chat_db, tmp_path):
-    calls = 0
-    async def accept(args):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            await conversation.add_user('agent', ConversationMessageRequest(text='新约束', client_id='late'))
-        return args
-    tool = submit_tool('submit_fix', '提交', {'type': 'object', 'properties': {}}, accept)
-    llm = ScriptedLLM([turn(('submit_fix', {})), turn(('submit_fix', {}))])
-    await run_tool_agent(llm, [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'task'}], [tool], stream=ThinkingStream('agent', AsyncMock()), workspace=Workspace(tmp_path))
-    assert calls == 2
-    assert '新约束' in json.dumps(llm.calls[1]['messages'], ensure_ascii=False)
 
 
-@pytest.mark.asyncio
-async def test_ask_user_waits_for_answer(chat_db, tmp_path):
-    llm = ScriptedLLM([turn(('ask_user', {'question': 'Delete 需要支持吗？'})), turn(('submit_fix', {}))])
-    async def accept(args):
-        return args
-    task = asyncio.create_task(run_tool_agent(llm, [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'task'}],
-        [submit_tool('submit_fix', '提交', {'type': 'object', 'properties': {}}, accept)],
-        stream=ThinkingStream('agent', AsyncMock()), workspace=Workspace(tmp_path)))
-    try:
-        async with asyncio.timeout(3):
-            while not await conversation.messages('agent'):
-                await asyncio.sleep(.01)
-        await agents.send_conversation('agent', ConversationMessageRequest(text='不需要', client_id='answer'))
-        assert (await asyncio.wait_for(task, 3))[0] == 'submit_fix'
-        assert '不需要' in json.dumps(llm.calls[1]['messages'], ensure_ascii=False)
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -227,9 +183,8 @@ async def test_real_pi_steering_and_cancellation(chat_db, tmp_path, monkeypatch)
             self.wfile.write(b'data: [DONE]\n\n')
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setattr(get_settings(), 'agent_engine', 'pi')
     await conversation.add_user('agent', ConversationMessageRequest(text='只处理 Backspace，Delete 保持现状', client_id='pi-steer'))
-    llm = SimpleNamespace(client=SimpleNamespace(provider=SimpleNamespace(base_url=f'http://127.0.0.1:{server.server_port}/v1', api_key='test-key')), model='test-model', defaults={})
+    llm = SimpleNamespace(client=SimpleNamespace(provider=SimpleNamespace(base_url=f'http://127.0.0.1:{server.server_port}/v1', api_key='test-key', context_windows={'test-model': 64000})), model='test-model', defaults={})
     async def accept(args):
         return args
     try:
@@ -300,12 +255,19 @@ async def test_idle_discussion_answers_with_only_read_tools(chat_db, tmp_path, m
         await db.execute("UPDATE agents SET status='awaiting_confirmation', worktree_path=? WHERE agent_id='agent'", (str(tmp_path),))
         await db.commit()
     await conversation.add_user('agent', ConversationMessageRequest(text='为什么这样修改？', client_id='why'))
-    llm = ScriptedLLM([turn(('submit_reply', {'reply': '修改只覆盖 Backspace 的空公式删除行为，尚未合并。'}))])
-    monkeypatch.setattr(LLMFactory, 'create', lambda **kwargs: llm)
+    from src.core import agent_runtime
+    from src.core.pi_tools import PiTools
+    async def pi_reply(llm, messages, tools, **kwargs):
+        workspace = kwargs['workspace']
+        assert workspace.mode == 'read'
+        names = set(PiTools(workspace, tools).names) | {tool.name for tool in tools}
+        assert not names & {'bash', 'edit', 'write', 'submit_fix', 'submit_analysis', 'browser'}
+        terminal = next(tool for tool in tools if tool.name == 'submit_reply')
+        return 'submit_reply', await terminal.handler({'reply': '修改只覆盖 Backspace 的空公式删除行为，尚未合并。'})
+    monkeypatch.setattr(LLMFactory, 'create', lambda **kwargs: None)
+    monkeypatch.setattr(agent_runtime, 'run_pi_agent', pi_reply)
     assert await agent_discussion.discuss('agent') is True
     items = await conversation.messages('agent')
     assert items[-1]['role'] == 'assistant' and '尚未合并' in items[-1]['text']
-    names = set(llm.calls[0]['tools'])
-    assert not names & {'run_command', 'edit_file', 'apply_patch', 'submit_fix', 'submit_analysis', 'browser'}
     async with aiosqlite.connect(path) as db:
         assert (await (await db.execute("SELECT status FROM agents WHERE agent_id='agent'")).fetchone())[0] == 'awaiting_confirmation'

@@ -81,7 +81,11 @@ npm run dev
 
 ### Pi 执行内核
 
-默认使用 Pi 执行内核，需要 Node.js ≥22.19。启动脚本会准备 Pi 依赖；手动启动前在 `backend/pi` 执行 `npm ci`。Pi 管理模型请求、上下文压缩和持久会话，并复用 SDK 的原生读写、批量编辑、查找、列目录、命令执行和项目 Skills；项目负责权限、复现验证、证据与人工审批，受控内容搜索仍沿用现有实现。已有显式内核配置保持不变，可在设置的“修复执行内核”切换，或用 `AGENT_ENGINE=native` 保留旧执行器。Pi 异常不会静默回退。详见 [Pi 接入与边界](backend/docs/pi-conversation.md)。
+项目仅使用 Pi 执行内核，需要 Node.js ≥22.19。启动脚本会准备 Pi 依赖；手动启动前在 `backend/pi` 执行 `npm ci`。Pi 管理模型请求、上下文压缩和持久会话，并提供原生读写、批量编辑、查找、列目录、命令执行和项目 Skills；Python 负责权限、受控搜索、复现验证、证据与人工审批。旧 `AGENT_ENGINE` 和 `agent_runtime.json` 不再参与执行选择，内核切换入口已移除；历史任务与 Pi 会话保留。详见 [Pi 接入与边界](backend/docs/pi-conversation.md)。
+
+### Agent 调用监控
+
+使用自托管 Langfuse 查看模型输入输出、工具调用、耗时、token 和错误。部署、凭据初始化及后端启用步骤见 [Langfuse 运维说明](infra/langfuse/README.md)。监控异步上报，不参与业务审批与交付。
 
 ### 使用
 

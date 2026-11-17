@@ -50,19 +50,14 @@ echo ""
 
 # 2. 准备默认 Pi 内核
 echo "📦 [2/5] 准备 Pi 执行内核..."
-REPAIR_ENGINE=$(venv/bin/python -c 'from src.core.runtime_config import engine; print(engine())')
-if [ "$REPAIR_ENGINE" = "pi" ]; then
-    if ! command -v node >/dev/null 2>&1 || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)'; then
-        echo "❌ Pi 执行内核要求 Node.js 22.19 或更新版本"
-        exit 1
-    fi
-    if [ ! -f "pi/node_modules/@earendil-works/pi-coding-agent/package.json" ]; then
-        npm ci --prefix pi
-    fi
-    echo "✅ Pi 依赖已就绪"
-else
-    echo "✅ 已显式选择 native，跳过 Pi 依赖准备"
+if ! command -v node >/dev/null 2>&1 || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)'; then
+    echo "❌ Pi 执行内核要求 Node.js 22.19 或更新版本"
+    exit 1
 fi
+if [ ! -f "pi/node_modules/@earendil-works/pi-coding-agent/package.json" ]; then
+    npm ci --prefix pi
+fi
+echo "✅ Pi 依赖已就绪"
 echo ""
 
 # 3. 安装前端依赖

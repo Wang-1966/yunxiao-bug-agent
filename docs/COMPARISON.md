@@ -1,5 +1,7 @@
 # Agent 产品设计对比分析
 
+> 早期对照笔记。当前产品用 Pi 做工具循环与压缩，用 Python 做权限、验证和审批，不以「自研一套 Claude Code」为目标。总览见 [README](../README.md)。
+
 ## Claude Code 的设计原则
 
 ### 1. **单 Agent 迭代，无独立审查**

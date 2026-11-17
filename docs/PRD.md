@@ -1,5 +1,7 @@
 # 云效 Bug 修复 Agent - 产品需求文档 (PRD) v2.0
 
+> **当前产品形态以 [README](../README.md) 为准。** 本文是早期需求稿。实现上已统一 Pi 执行内核，前端开发端口为 3001，并增加修复工作台、项目预览、逐项验收和可选 Langfuse。下列页面名称与「设置页」划分已部分过时。
+
 ## 一、产品概述
 
 ### 1.1 产品定位
@@ -60,11 +62,15 @@
      - 停止
      - 查看详情
 
-5. **设置页**
-   - LLM 配置（模型选择、API Key）
-   - Agent 并发数配置
-   - 云效连接配置
-   - 通知设置
+5. **模型与通用配置 / 方案确认策略 / 项目与仓库**
+   - OpenAI 兼容提供商、阶段模型（分析 `analyze`、修复 `fix`）
+   - 云效连接（界面保存优先于 `.env`）
+   - 仓库、验证命令、预览启动命令
+   - 方案确认模式 always / smart / never
+
+6. **修复工作台**（`/agents/:agentId`）
+   - 单栏对话、方案选择、活动状态、停止与继续修复
+   - 验收仍走审查弹窗；闲聊不批准合并
 
 **优先级**：P0（必须）
 
@@ -517,18 +523,9 @@ Agent 开始修复，实时显示进度：
 
 ### 4.1 技术栈
 
-**前端：**
-- React 18 + TypeScript
-- Ant Design / MUI（组件库）
-- TanStack Query（数据管理）
-- WebSocket（实时通信）
-- Zustand（状态管理）
+**前端：** React 18 + TypeScript、Ant Design 5、Zustand、Axios、WebSocket、Vite（开发端口 3001）。
 
-**后端：**
-- FastAPI（Python）
-- LangGraph（Agent 框架）
-- SQLite（数据持久化）
-- WebSocket（实时推送）
+**后端：** FastAPI、LangGraph（仅阶段编排）、Pi 执行内核、SQLite、可选 Langfuse。
 
 ### 4.2 页面结构
 

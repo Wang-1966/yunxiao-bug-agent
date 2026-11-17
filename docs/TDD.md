@@ -1,93 +1,43 @@
 # 云效 Bug 修复 Agent - 技术设计文档 (TDD) v2.0
 
+> **当前实现以 [README](../README.md)、[Pi 执行内核](../backend/docs/pi-conversation.md)、[修复交付闭环](AGENT_DELIVERY.md) 为准。** 本文是早期设计稿。下文若仍写 native 工具循环、`AGENT_ENGINE` 切换、TanStack Query、LangGraph Checkpoints 或「自己实现 Claude Code」，均已过时：编码执行已统一为 Pi，LangGraph 只保留阶段图。
+
 ## 一、技术架构
 
 ### 1.1 整体架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         前端层 (React)                       │
-│                         Port: 3000                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │Dashboard │  │Bug 列表  │  │Agent监控 │  │Bug详情   │  │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
-└────────────────────────┬────────────────────────────────────┘
-                         │ HTTP / WebSocket
-┌────────────────────────┴────────────────────────────────────┐
-│                    API 网关层 (FastAPI)                      │
-│                         Port: 8000                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │REST API  │  │WebSocket │  │认证中间件│  │CORS      │  │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────┴────────────────────────────────────┐
-│                    业务逻辑层                                │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │          多 Agent 调度器 (AgentOrchestrator)        │   │
-│  │  - 任务队列管理                                      │   │
-│  │  - Agent 生命周期管理                                │   │
-│  │  - 并发控制 (最多 N 个 agent)                        │   │
-│  │  - 负载均衡                                          │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                         │                                    │
-│  ┌──────────┬──────────┼──────────┬──────────┐             │
-│  │          │          │          │          │             │
-│  ▼          ▼          ▼          ▼          ▼             │
-│  Agent-1   Agent-2   Agent-3   Agent-4   Agent-5           │
-│  (LangGraph) (LangGraph) (LangGraph) ...                   │
-│                                                              │
-│  每个 Agent:                                                 │
-│  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐            │
-│  │获取 │→ │分析 │→ │方案 │→ │修复 │→ │验证 │            │
-│  └─────┘  └─────┘  └─────┘  └─────┘  └─────┘            │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────┴────────────────────────────────────┐
-│                      工具层                                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │云效 MCP  │  │代码分析  │  │测试执行  │  │Git操作   │  │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────┴────────────────────────────────────┐
-│                     持久化层                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │ SQLite       │  │ LangGraph    │  │ File System  │     │
-│  │ (业务数据)   │  │ Checkpoints  │  │ (日志、代码) │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-└─────────────────────────────────────────────────────────────┘
+浏览器 React + Ant Design  :3001
+        │ HTTP / WebSocket
+FastAPI :8000
+        ├── 调度器 Orchestrator：队列、并发、暂停/续跑
+        ├── 阶段图 LangGraph：获取 → 工作树 → 分析 → 方案确认 → 修复 → 验证
+        ├── Pi 子进程：模型请求、原生文件/命令工具、压缩、JSONL 会话
+        └── Python 宿主：权限、受控 grep、证据、复现验证、commit-tree、云效
+               │
+SQLite · agent_sessions/*.pi.jsonl · agent_context/
+可选 Langfuse :3002（监控，不参与审批）
 ```
+
+页面：仪表盘、Bug 列表/详情、Agent 工位、修复工作台 `/agents/:id`、项目与仓库、模型与通用配置、方案确认策略。
 
 ### 1.2 技术栈选型
 
-| 层级 | 技术选型 | 理由 |
+| 层级 | 技术选型 | 说明 |
 |------|----------|------|
-| **前端** |
-| 框架 | React 18 + TypeScript | 生态成熟，类型安全 |
-| UI 组件库 | Ant Design 5 | 企业级 UI，组件丰富 |
-| 状态管理 | Zustand | 轻量，易用 |
-| 数据请求 | TanStack Query v5 | 强大的缓存和同步 |
-| 实时通信 | WebSocket (原生 API) | 双向通信，实时推送 |
-| 路由 | React Router v6 | 标准路由方案 |
-| 构建工具 | Vite | 快速的开发体验 |
-| **后端** |
-| Web 框架 | FastAPI | 高性能，原生异步，自动文档 |
-| Agent 框架 | LangGraph | 状态管理、检查点、工具集成 |
-| **LLM（可配置）** | **支持多种模型** | **灵活选择** |
-| - Claude Opus 5 | Anthropic API | 代码理解能力最强 |
-| - Grok 4.7 | 中转站 API (OpenAI 兼容) | 性价比高 |
-| - GPT-4 | OpenAI API | 备选方案 |
-| - 混合模式 | 不同阶段用不同模型 | 成本优化 |
-| 云效集成 | MCP (Model Context Protocol) | 官方推荐，标准化工具协议 |
-| 数据库 | SQLite | 轻量、可靠、无需额外服务 |
-| 任务队列 | asyncio.Queue | 轻量级异步队列 |
-| WebSocket | FastAPI WebSocket | 内置支持 |
-| **工具** |
-| 代码分析 | Tree-sitter + AST | 准确的语法分析 |
-| 测试执行 | subprocess | 兼容各种测试框架 |
-| Git 操作 | GitPython | Python Git 封装 |
-| 配置管理 | Pydantic Settings | 类型安全配置 |
+| 前端 | React 18 + TypeScript + Vite | `npm run dev` 端口 3001 |
+| UI | Ant Design 5 | 工位与工作台 |
+| 状态 | Zustand + Axios + WebSocket | 无 TanStack Query |
+| 路由 | React Router v6 | |
+| Web | FastAPI | `/health`、`/docs` |
+| 阶段编排 | LangGraph | 只编排阶段，不跑工具循环 |
+| 执行内核 | Pi Coding Agent 1.5.0 | 模型、工具、压缩、会话 |
+| LLM | OpenAI 兼容提供商 | 界面配置，窗口自动解析 |
+| 云效 | OpenAPI | Token 存本机配置文件 |
+| 数据 | SQLite | 业务状态与对话 |
+| 会话 | `agent_sessions/*.pi.jsonl` | Pi 持久化，非 LangGraph checkpoint |
+| 监控 | 可选 Langfuse | 异步上报 |
+| Git | worktree + commit-tree | 模型不能自行提交合并 |
 
 ### 1.3 多 Agent 隔离方案
 
@@ -117,15 +67,9 @@
 
 ## 二、LLM 架构设计（核心）
 
-### 2.1 为什么需要可配置的 LLM 后端
+### 2.1 可配置 LLM 与执行内核
 
-**Agent 的本质**：Agent = LLM + 工具集 + 状态管理
-
-- **Claude Code** = Claude Opus 5 + 工具调用（读文件、写代码、运行命令）
-- **Grok Build** = Grok 4.7 + 工具调用（同样的能力）
-- **本项目 Agent** = 可配置的 LLM + 工具集 + Web UI + 多并发
-
-**Agent 不需要"调用"Claude Code 或 Grok Build，而是自己实现相同的能力，但提供更好的用户体验和并发能力。**
+阶段模型在界面配置，经 OpenAI 兼容接口调用。分析/讨论使用 `analyze`，修复使用 `fix`。编码工具循环不再由 Python `tool_agent` 实现，而是 Pi SDK：原生 `read` / `edit` / `write` / `find` / `ls` / `bash`，压缩与会话也由 Pi 管理。宿主仍负责权限、受控搜索、验证与审批。
 
 ### 2.2 统一的 LLM 客户端接口
 
@@ -1563,15 +1507,14 @@ async def estimate_bug_fix_cost(config: LLMConfig):
 ### 4.1 开发环境
 
 ```bash
-# 前端
-cd frontend
-npm install
-npm run dev  # http://localhost:3000
-
-# 后端
+# 推荐仓库根目录 ./scripts/start.sh
+# 前端 npm run dev → http://localhost:3001
+# 后端需 Python 3.11+ 与 Node.js ≥22.19，并在 backend/pi 执行 npm ci
 cd backend
-pip install -r requirements.txt
-python -m src.main  # http://localhost:8000
+python3.11 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
+npm ci --prefix pi
+venv/bin/python -m src.main  # http://localhost:8000
 ```
 
 ### 4.2 生产环境（Docker）

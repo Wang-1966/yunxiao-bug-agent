@@ -1,5 +1,7 @@
 # 修复 Agent Harness 优化方案与实施计划
 
+> **当前实现：** `core/tool_agent.py` 与 native 编码工具循环已删除，执行内核仅为 Pi。本文件保留对照 Grok Build / Codex 时的问题清单与阶段目标，细节以 [Pi 执行内核](pi-conversation.md) 和 [README](../../README.md) 为准。
+
 ## 1. 背景与诊断
 
 同一个 bug、同一个中转站和模型（grok-4.7），Grok Build 能修好，本项目修不好。根据运行日志和三家开源/公开 harness 的对比，问题不在模型，而在 harness：

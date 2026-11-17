@@ -1,242 +1,121 @@
 # 云效 Bug 修复 Agent
 
-一个基于 Web UI 的自主 Bug 修复系统，支持多 Agent 并发工作。Agent 使用可配置的 LLM（Claude/Grok/GPT）来分析和修复代码，用户通过可视化界面管理修复流程。
+本机 Web 系统，从云效拉取 Bug，用可配置的 OpenAI 兼容模型在隔离工作树里分析、修复并验证。多个 Agent 可并发工作；方案确认、逐项验收和合并仍由人决定。
 
-## ⭐ 核心特性
+## 当前架构
 
-- 🌐 **Web UI 界面**：可视化操作，实时查看所有 agent 状态
-- 🤖 **多 Agent 并发**：同时运行 3-5 个 agent，大幅提升效率
-- 🎛️ **可配置 LLM**：支持 Claude/Grok/GPT，不同阶段用不同模型优化成本
-- 🔍 **深度分析**：不猜测根因，不确定时使用日志确认
-- 🎯 **追求最优**：提供最优方案而非最快修复
-- ✅ **全面验证**：确保修复不影响其他功能
-- 🎮 **保留决策权**：关键决策点需要你确认
-- 💾 **状态持久化**：支持断点恢复
-- 📊 **实时通信**：WebSocket 推送状态更新
-
-## 💡 核心理解
-
-**Agent 不是去"调用"Claude Code 或 Grok Build，而是自己实现相同的能力！**
+LangGraph 只负责阶段编排。编码、工具循环、上下文压缩和会话续跑全部交给 Pi（`@earendil-works/pi-coding-agent`）。Python 宿主管权限、受控搜索、复现验证、证据、Git 交付和人工审批。旧 native 工具循环与内核切换已删除。
 
 ```
-Claude Code = Claude Opus 5 + 工具调用
-Grok Build  = Grok 4.7 + 工具调用
-本项目     = 可配置的 LLM + 工具集 + Web UI + 多并发
+浏览器  React + Ant Design  :3001
+   │  HTTP / WebSocket
+FastAPI  :8000
+   ├── 调度器：队列、并发（默认 3）、暂停 / 续跑
+   ├── 阶段图：获取 Bug → 工作树 → 分析 → 方案确认 → 修复 → 验证
+   ├── Pi 子进程：模型请求、原生读写/编辑/查找/命令、压缩、JSONL 会话
+   └── Python 宿主：路径权限、受控 grep、证据、复现与构建、commit-tree、云效同步
+          │
+SQLite · agent_sessions/*.pi.jsonl · agent_context/
+可选：自托管 Langfuse :3002（调用监控，不参与审批）
 ```
 
-**Agent 拥有和这些工具完全相同的能力，但提供了：**
-- ✅ Web UI 可视化操作（而不是 CLI）
-- ✅ 多 Agent 并发修复（而不是单线程）
-- ✅ 灵活的 LLM 配置（而不是固定模型）
-- ✅ 云效自动集成（而不是手动）
-- ✅ 成本优化（不同阶段用不同模型）
+分析与只读讨论使用 `analyze` 阶段模型；修复使用 `fix` 阶段模型。界面上的 propose / verify 配置保留，当前不会单独发起这两段模型循环。
+
+## 核心能力
+
+- 云效缺陷同步，确认合并后回写工作项状态
+- 多 Agent 并发，每个任务独立 Git worktree 与 `agentfix/...` 分支
+- 修复工作台：对话、方案选择、活动状态、停止与继续修复
+- 先失败复现测试，再改业务代码；验证通过后由系统 `commit-tree`，模型不能自行提交或合并
+- 逐项验收、工作树预览（可走原浏览器端口）和合并冲突保留
+- 上下文窗口按提供商 / 项目默认表 / Pi 目录自动解析，压缩由 Pi 管理
+- 可选 Langfuse：模型输入输出、工具、耗时与 token
 
 ## 快速开始
 
-### 环境要求
+需要 **Python 3.11+**、**Node.js ≥ 22.19**、Git。前端开发服务为 **http://localhost:3001**。
 
-- Node.js 18+
-- Python 3.11+
-- Git
+```bash
+# 可选：复制环境变量模板（云效也可之后在界面填写）
+cp backend/.env.example backend/.env
 
-### 安装和运行
+./scripts/start.sh
+# 指定 Python：BACKEND_PYTHON=/path/to/python3.11 ./scripts/start.sh
+```
 
-#### 1. 后端
+停止：`./scripts/stop.sh`。
+
+手动启动：
+
 ```bash
 cd backend
 python3.11 -m venv venv
 venv/bin/python -m pip install -r requirements.txt
+# 首次或 Pi 依赖缺失时：
+npm ci --prefix pi
+venv/bin/python -m src.main          # http://localhost:8000
 
-# 配置环境变量
-export ANTHROPIC_API_KEY="your-claude-api-key"
-export GROK_API_KEY="your-grok-relay-api-key"
-
-# 启动后端
-venv/bin/python -m src.main
-# 访问 http://localhost:8000
-```
-
-#### 2. 前端
-```bash
 cd frontend
 npm install
-
-# 启动前端
-npm run dev
-# 访问 http://localhost:3000
+npm run dev                          # http://localhost:3001
 ```
 
-### 配置 LLM
+打开界面后：
 
-1. 打开 Web UI：http://localhost:3000
-2. 进入"设置" → "LLM 配置"
-3. 配置 API Key：
-   - Claude API Key（如果使用 Claude）
-   - Grok 中转站 URL 和 API Key（如果使用 Grok）
-4. 选择模型配置：
-   - 简单模式：选择一个默认模型
-   - 混合模式：不同阶段用不同模型（推荐，节省 60% 成本）
-5. 点击"测试连接"验证
-6. 保存配置
+1. **模型与通用配置**：添加 OpenAI 兼容提供商，拉取模型列表，测试连接并保存。不必填写上下文窗口。
+2. **项目与仓库**：绑定源码仓库、目标分支、验证命令；需要验收预览时再填启动命令。
+3. **云效 MCP 配置**：组织、项目、Token；项目 ID 填 `*` 同步组织下可访问项目。
+4. **Bug 悬赏榜**同步缺陷，补充说明后开始修复；在 **Agent 工位** 或 `/agents/:id` 工作台跟进。
 
-### Pi 执行内核
+可选监控见 [Langfuse 运维说明](infra/langfuse/README.md)。健康检查：http://localhost:8000/health 。API 文档：http://localhost:8000/docs 。
 
-项目仅使用 Pi 执行内核，需要 Node.js ≥22.19。启动脚本会准备 Pi 依赖；手动启动前在 `backend/pi` 执行 `npm ci`。Pi 管理模型请求、上下文压缩和持久会话，并提供原生读写、批量编辑、查找、列目录、命令执行和项目 Skills；Python 负责权限、受控搜索、复现验证、证据与人工审批。旧 `AGENT_ENGINE` 和 `agent_runtime.json` 不再参与执行选择，内核切换入口已移除；历史任务与 Pi 会话保留。详见 [Pi 接入与边界](backend/docs/pi-conversation.md)。
+## 使用要点
 
-### Agent 调用监控
-
-使用自托管 Langfuse 查看模型输入输出、工具调用、耗时、token 和错误。部署、凭据初始化及后端启用步骤见 [Langfuse 运维说明](infra/langfuse/README.md)。监控异步上报，不参与业务审批与交付。
-
-### 使用
-
-1. **Dashboard**：查看 bug 统计和 agent 状态
-2. **Bug 列表**：点击"修复"按钮启动 agent
-3. **Agent 监控**：实时查看修复进度
-4. **决策确认**：在关键决策点进行确认
-5. **完成**：查看修复结果，更新云效状态
-
-### 待办与逐项验收
-
-- Agent 页面顶部的“待我处理”按待选方案、待回答、待验收和异常分类，依据当前任务归属与待决记录展示，按 Bug 优先级和等待时间排序。
-- 新分析会为每项验收要求记录测试覆盖说明或人工检查步骤。验收面板区分 Agent 的覆盖解释、系统实际运行的命令结果、验证限制和人工结论。
-- 自动证据绑定验收要求版本和已验证提交。第一版复用复现测试命令，展示关联命令的整体结果，不解析每条断言；项目构建成功不会被推断为所有业务条目通过。
-- 逐项标记“通过”后可确认并合并；“未通过”的条目和反馈会进入下一轮修复。文字、截图与条目选择保存在本机浏览器 IndexedDB，版本变化时不会套用旧草稿。
-- 历史任务保留原始检查记录，缺少逐项覆盖关系时交由人工核对。旧版 API 调用方式仍兼容。
-- 经逐项验收的提交遇到合并冲突时保留原提交，可通过“仍未修复”退回修复，在目标分支最新代码上重新验证与验收。
-
-## 工作流程
-
-```
-1. 获取 Bug → 2. 深度分析 → 3. 设计方案 → 4. 实施修复 → 5. 全面验证
-                    ↓                ↓                           ↓
-                需要日志确认      等待你确认方案         验证是否通过
-```
-
-**每个阶段：**
-- **获取 Bug**：从云效自动获取，或手动选择
-- **深度分析**：理解触发条件和现象，定位根因（置信度低时建议添加日志）
-- **设计方案**：提供多个方案对比，推荐最优方案（不是最快修复）
-- **实施修复**：修改代码、添加测试、创建 commit
-- **全面验证**：运行测试、检查影响范围，确保不影响其他功能
-
-## LLM 配置说明
-
-### 支持的模型
-
-| 模型 | 提供商 | 适用场景 | 成本 |
-|------|--------|----------|------|
-| Claude Opus 5 | Anthropic | 深度分析、复杂理解 | 高 |
-| Claude Sonnet 4 | Anthropic | 快速验证、平衡性能 | 中 |
-| Grok 4.7 | xAI (中转站) | 代码生成、方案设计 | 低 |
-| GPT-4 | OpenAI | 通用备选 | 高 |
-
-### 推荐配置（成本优化）
-
-```yaml
-分析根因: Claude Opus 5   # 需要深度理解，用最强的
-设计方案: Grok 4.7        # 生成方案，性价比高
-实施修复: Grok 4.7        # 写代码，性价比高
-验证修复: Claude Sonnet 4 # 快速验证，便宜
-```
-
-**成本对比：**
-- Claude Opus 5 全程: ~$0.50/bug
-- **混合配置: ~$0.20/bug (节省 60%)**
-- Grok 4.7 全程: ~$0.15/bug
-
-### Grok 中转站配置
-
-由于 xAI 可能没有公开 API，需要通过中转站访问：
-
-1. 获取中转站信息（URL 和 API Key）
-2. 在 Web UI 的"LLM 配置"页面填入：
-   - Base URL: `https://your-relay.com/v1`
-   - API Key: 你的中转站密钥
-   - 模型名称: `grok-4.7`（或中转站指定的）
-3. 点击"测试连接"验证
+- **待我处理**：方案待选、待回答、待验收和异常，按 Bug 优先级与等待时间排序。
+- 新分析会为验收要求写下覆盖说明或人工检查步骤。系统命令结果与 Agent 解释分开展示；构建成功不会被当成全部业务条目通过。
+- 逐项「通过」后可确认合并；「未通过」进入下一轮。文字、截图与条目选择存在浏览器 IndexedDB。
+- 中断后点「继续修复」或发送明确短指令，Pi 恢复已保存会话；普通闲聊不会改代码或批准合并。
+- 合并冲突时保留原修复提交，可通过「仍未修复」在目标分支最新代码上重跑。
 
 ## 文档
 
-- [产品需求文档 (PRD)](docs/PRD.md)
-- [技术设计文档 (TDD)](docs/TDD.md)
-- [用户手册](docs/USER_GUIDE.md) (待完成)
-- [开发指南](docs/DEVELOPMENT.md) (待完成)
+| 文档 | 内容 |
+|------|------|
+| [快速开始](QUICKSTART.md) | 安装、配置、常见问题 |
+| [Pi 执行内核](backend/docs/pi-conversation.md) | 职责边界、会话、恢复、智能确认 |
+| [上下文管理](backend/docs/context-management-operations.md) | 压缩、证据、指标与报告 |
+| [模型窗口默认配置](backend/docs/model-context-defaults.md) | 窗口来源与维护 |
+| [修复交付闭环](docs/AGENT_DELIVERY.md) | 验证、commit-tree、审查、合并 |
+| [后端说明](backend/README.md) | 工作树、预览、云效同步、补充信息 |
+| [Langfuse](infra/langfuse/README.md) | 自托管监控 |
+| [提示词](backend/src/prompts/README.md) | 模板与回答风格 |
+
+早期 PRD / TDD 等设计稿仍保留，正文可能落后于实现，以本页和上表为准。
 
 ## 技术栈
 
-**前端：**
-- React 18 + TypeScript
-- Ant Design 5 - UI 组件库
-- Zustand - 状态管理
-- TanStack Query - 数据请求
-- WebSocket - 实时通信
-- Vite - 构建工具
+**前端：** React 18、TypeScript、Ant Design 5、Zustand、React Router、Axios、Vite（`npm run dev` 使用 3001 端口）。
 
-**后端：**
-- FastAPI - Web 框架
-- LangGraph - Agent 状态机
-- 多 LLM 支持 - Claude/Grok/GPT
-- 云效 MCP - Bug 平台集成
-- SQLite - 数据持久化
-- asyncio.Queue - 任务队列
+**后端：** FastAPI、LangGraph（仅阶段图）、Pi Coding Agent 1.5.0、OpenAI SDK、SQLite、Langfuse SDK（可选）。
 
-**工具：**
-- Tree-sitter - 代码分析
-- GitPython - Git 操作
-- subprocess - 测试执行
+**工具：** Pi 原生文件与命令、macOS `sandbox-exec`、项目受控 grep、Git worktree / commit-tree、云效 OpenAPI。
 
 ## 项目结构
 
 ```
 yunxiao-bug-agent/
-├── frontend/              # React 前端
-│   ├── src/
-│   │   ├── pages/         # 页面组件
-│   │   │   ├── Dashboard/
-│   │   │   ├── BugList/
-│   │   │   ├── AgentMonitor/
-│   │   │   └── Settings/
-│   │   ├── components/    # 通用组件
-│   │   ├── stores/        # 状态管理
-│   │   ├── hooks/         # 自定义 Hooks
-│   │   └── api/           # API 调用
-│   └── package.json
-├── backend/               # FastAPI 后端
-│   ├── src/
-│   │   ├── api/           # API 路由
-│   │   ├── core/          # 调度器
-│   │   ├── agent/         # Agent 实现
-│   │   ├── llm/           # LLM 客户端
-│   │   ├── tools/         # 工具集成
-│   │   └── models/        # 数据模型
-│   └── requirements.txt
-├── docs/                  # 文档
-│   ├── PRD.md            # 产品需求文档
-│   ├── TDD.md            # 技术设计文档
-│   └── SUMMARY.md        # 文档总结
-└── README.md
+├── frontend/                 # React 界面
+├── backend/
+│   ├── src/api/              # HTTP / WebSocket
+│   ├── src/agent/            # 阶段图与节点
+│   ├── src/core/             # 调度、Pi 宿主、验证、合并、预览
+│   ├── src/llm/              # OpenAI 兼容客户端
+│   ├── pi/                   # Pi 桥接与模型窗口配置
+│   └── docs/                 # 执行内核与上下文说明
+├── infra/langfuse/           # 自托管监控
+├── docs/                     # 交付闭环与历史设计稿
+└── scripts/start.sh
 ```
-
-## 开发进度
-
-- [x] 项目结构和文档
-- [x] 后端基础框架（35+ 文件，2500+ 行代码）
-- [x] 前端完整实现（30+ 文件，完整 UI）
-- [x] LLM 统一架构（支持 Claude/Grok 中转 API）
-- [x] LangGraph Agent 状态机（7 个节点）
-- [x] 多 Agent 调度器（并发 + 任务队列）
-- [x] WebSocket 实时通信
-- [x] Git Worktree 隔离
-- [ ] 依赖安装和服务启动
-- [ ] 端到端集成测试
-- [ ] 云效 MCP 集成测试
-- [ ] 优化和完善
-
-**当前状态**: ✅ 核心框架完成，等待安装依赖和测试
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
 
 ## 许可证
 

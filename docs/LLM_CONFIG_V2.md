@@ -1,5 +1,7 @@
 # LLM 配置设计 v2.0
 
+> **当前行为：** 提供商在 Web UI「模型与通用配置」写入 `backend/data/llm_config.json`，不读 `CLAUDE_RELAY_*` / `GROK_RELAY_*`。上下文窗口由提供商 `context_window`/`context_length`、项目默认表或 Pi 目录自动解析，用户无需填写。实际发起模型循环的阶段是 `analyze`（分析与讨论）和 `fix`（修复）；界面上的 propose / verify 项会保存，但当前不会单独跑这两段工具循环。详见 [README](../README.md) 与 [模型窗口默认配置](../backend/docs/model-context-defaults.md)。
+
 ## 核心改进
 
 ### 1. 统一使用中转站 API

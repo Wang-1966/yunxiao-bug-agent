@@ -6,7 +6,7 @@
 - `analyze.txt`、`fix.txt`：分析阶段（症状契约、假设、复现、方案）和修复阶段的任务提示。
 - `review_*.txt`：独立对抗审查员的系统提示及分析/修复审查材料。
 - `styles/`：具体（`detailed`）、较简（`concise`）、极简（`minimal`）的表达规则。
-- `vision*.txt`、`compacted_output.txt`：截图识别和上下文压缩占位说明。
+- `vision*.txt`：截图识别。会话压缩由 Pi SDK 完成，不再走这些模板。`compacted_output.txt` 是历史占位，当前代码不读取。
 
 在「通用配置 → 提示词工程」选择并保存回答风格，设置复用 `data/llm_config.json` 的 `response_style` 字段。旧配置默认使用具体档；保存后后续阶段生成提示词时使用新设置，不重写历史回答或正在发送的请求。
 

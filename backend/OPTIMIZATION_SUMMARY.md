@@ -1,5 +1,7 @@
 # Agent 性能优化摘要
 
+> 去掉独立 Review Agent、改工具验证时的笔记。其后执行内核已迁到 Pi，耗时数字不可当作当前基准。现行流程见 [README](../README.md)。
+
 ## 🎯 优化目标
 
 基于 agent-task-9db9bea4 的性能分析，去掉独立的 Review Agent，改为依赖工具验证，大幅提升修复效率。

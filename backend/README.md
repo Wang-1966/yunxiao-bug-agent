@@ -1,5 +1,7 @@
 # 云效 Bug 修复 Agent - 后端
 
+执行路径只走 Pi：模型请求、工具循环、压缩和会话在 `pi/` 的 Node 桥接里完成。Python 负责调度、权限、证据、验证、合并与云效同步。LangGraph 仅编排阶段，不再跑 native 工具循环。总览见仓库 [README](../README.md)，内核边界见 [Pi 执行内核](docs/pi-conversation.md)。
+
 ## 修复分支与 Git 记录
 
 新任务的隔离分支使用 `agentfix/<Bug短ID>-<短标题>-<运行短ID>`，例如
@@ -107,185 +109,60 @@ Bug ID 取前 8 个字符，运行 ID 取前 12 个字符；完整 Bug 标题仍
 
 验证：`python3 -m pytest tests/test_rich_input.py tests/test_bug_supplements.py tests/test_agent_retry.py tests/test_feedback_images.py -q`。
 
-多 Agent 并发 Bug 修复系统后端服务
+## 技术栈与结构
 
-## 技术栈
-
-- **框架**: FastAPI 0.115.0
-- **Agent 框架**: LangGraph 0.2.45
-- **数据库**: SQLite (aiosqlite)
-- **LLM 客户端**: OpenAI SDK (统一接口)
-- **代码分析**: tree-sitter
-- **Git 操作**: GitPython
-- **日志**: loguru
-
-## 项目结构
+- FastAPI、LangGraph（仅阶段图）、Pi Coding Agent 1.5.0、OpenAI SDK、SQLite、loguru
+- 可选 Langfuse SDK，见 [自托管说明](../infra/langfuse/README.md)
 
 ```
 backend/
-├── src/
-│   ├── main.py              # FastAPI 应用入口
-│   ├── config.py            # 配置管理
-│   ├── api/                 # API 路由
-│   │   ├── bugs.py          # Bug 管理
-│   │   ├── agents.py        # Agent 管理
-│   │   ├── llm_config.py    # LLM 配置
-│   │   └── websocket.py     # WebSocket 通信
-│   ├── agent/               # LangGraph Agent
-│   │   ├── state.py         # 状态定义
-│   │   ├── nodes.py         # 节点实现
-│   │   └── graph.py         # 状态图
-│   ├── core/                # 核心逻辑
-│   │   └── orchestrator.py  # 多 Agent 协调器
-│   ├── llm/                 # LLM 抽象
-│   │   ├── unified_client.py # 统一客户端
-│   │   └── factory.py       # 客户端工厂
-│   ├── tools/               # 工具集
-│   │   ├── yunxiao/         # 云效 MCP 工具
-│   │   ├── code_analyzer/   # 代码分析
-│   │   ├── test_runner/     # 测试运行
-│   │   └── git_operator/    # Git 操作
-│   ├── models/              # 数据模型
-│   └── db/                  # 数据库
-│       ├── init.sql         # 初始化脚本
-│       └── database.py      # 数据库连接
-├── tests/                   # 测试
-├── requirements.txt         # 依赖
-└── README.md               # 本文件
+├── src/main.py config.py
+├── src/api/            # bugs、agents、llm_config、projects、settings、websocket
+├── src/agent/          # 阶段图 graph.py、节点 nodes.py
+├── src/core/           # 调度、Pi 宿主、验证合并、预览、云效、证据
+├── src/llm/            # OpenAI 兼容客户端
+├── pi/                 # Node 桥接、模型窗口默认表
+├── docs/               # 内核与上下文说明
+├── tests/
+└── requirements.txt
 ```
 
-## 快速开始
+`GET /api/settings/agent-runtime` 只报告 Pi 是否已安装，不能切换内核。
 
-### 1. 安装依赖
+## 启动
 
-```bash
-cd backend
-pip install -r requirements.txt
-```
-
-### 2. 配置环境变量
-
-创建 `.env` 文件：
-
-```env
-# API 配置
-API_HOST=0.0.0.0
-API_PORT=8000
-
-# CORS
-CORS_ORIGINS=["http://localhost:3000", "http://localhost:5173"]
-
-# 数据库
-DATABASE_URL=sqlite+aiosqlite:///./data/yunxiao_agent.db
-
-# Agent 配置
-MAX_CONCURRENT_AGENTS=3
-AGENT_TIMEOUT=1800
-
-# 工作目录
-WORKTREES_DIR=.worktrees
-
-# 日志
-LOG_LEVEL=INFO
-```
-
-### 3. 启动服务
-
-后端要求 Python 3.11+。首次运行请创建独立环境，并始终使用该环境启动：
+需要 Python 3.11+ 与 Node.js ≥ 22.19。推荐在仓库根目录用 `./scripts/start.sh`。仅启动后端：
 
 ```bash
 python3.11 -m venv venv
 venv/bin/python -m pip install -r requirements.txt
+npm ci --prefix pi
 venv/bin/python -m src.main
 ```
 
-已有 `venv` 若使用 Python 3.9/3.10，请先移走后重建。启动入口会检查版本，
-避免进入预览等功能后才出现 `asyncio.timeout` 不存在的错误。
+已有 `venv` 若低于 3.11，移走后重建。热重载必须排除工作树，否则依赖安装会重启后端并取消任务。`python -m src.main` 会自动创建并排除 `WORKTREES_DIR`。直接使用 uvicorn 时自行加 `--reload-exclude`。
 
-或使用 uvicorn：
+模型在 Web UI「模型与通用配置」中保存到 `data/llm_config.json`。分析/讨论走 `analyze`，修复走 `fix`。上下文窗口由提供商返回值、`pi/model-context-defaults.json` 或 Pi 目录解析，用户无需填写。
 
-```bash
-mkdir -p .worktrees
-venv/bin/python -m uvicorn src.main:app --reload --reload-dir src --reload-exclude .worktrees --host 0.0.0.0 --port 8000
-```
+API：http://localhost:8000/docs 。健康检查：http://localhost:8000/health 。
 
-开发热重载必须排除修复工作树，否则工作树中的 Python 源码或依赖安装会重启后端并取消任务。
-`python -m src.main` 会自动创建并排除 `WORKTREES_DIR`；直接使用 uvicorn 时，自定义工作树路径也需替换上述排除目录。
-
-## API 文档
-
-启动服务后访问：
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
-
-## 核心功能
-
-### 1. LLM 配置管理
-
-支持多个 LLM 提供商（Claude、Grok 等），所有提供商使用 OpenAI 兼容格式：
-
-```python
-{
-  "providers": [
-    {
-      "id": "claude",
-      "name": "Claude (Relay)",
-      "base_url": "https://relay.example.com/v1",
-      "api_key": "your-api-key",
-      "available_models": ["claude-opus-5"],
-      "default_model": "claude-opus-5",
-      "enabled": true
-    }
-  ],
-  "use_stage_config": true,
-  "stage_config": {
-    "analyze": {"provider": "claude", "model": "claude-opus-5"},
-    "fix": {"provider": "grok", "model": "grok-2"}
-  }
-}
-```
-
-### 2. 多 Agent 并发
-
-使用 `MultiAgentOrchestrator` 管理多个 Agent 并发执行：
-
-- 任务队列：优先级队列
-- 并发控制：最多 3 个 Agent 同时运行
-- Git Worktree 隔离：每个 Agent 独立工作树
-
-### 3. LangGraph 状态机
-
-Bug 修复流程：
+## 阶段流程
 
 ```
-fetch_bug → prepare_repository → analyze_root_cause（复现 + 审查）→ design_proposal → implement_fix（续接会话 + 审查）→ verify_fix（构建 + 复现测试）
+fetch_bug → prepare_repository → analyze_root_cause → design_proposal
+        →（人工确认方案）→ implement_fix → verify_fix（构建 + 复现测试）
 ```
 
-### 4. WebSocket 实时通信
-
-- Agent 状态更新
-- 日志流式输出
-- 用户决策请求/响应
+分析在隔离工作树里写复现测试并提交方案；确认后 Pi 续接会话改代码。验证通过由系统 `commit-tree`，合并仍走人工验收。详见 [修复交付闭环](../docs/AGENT_DELIVERY.md)。
 
 ## 开发
 
-上下文管理 v1 已支持证据回查、压缩失败保护和按运行保存指标。配置方式、日志位置及下一轮优化步骤见 [运行说明](docs/context-management-operations.md)，完整演进目标见 [设计方案](docs/context-management-design.md)。
-
-在 backend 目录运行 `venv/bin/python -m src.core.context_report` 查看汇总，使用 `--agent <agent_id>` 筛选任务，或 `--json` 导出统计。
-
-### 运行测试
+上下文压缩由 Pi 管理，策略版本 v2。证据回查、指标与报告见 [运行说明](docs/context-management-operations.md)。历史设计稿见 [设计方案](docs/context-management-design.md)。
 
 ```bash
-pytest tests/
+venv/bin/python -m src.core.context_report
+venv/bin/python -m src.core.context_report --agent agent-task-xxx
+venv/bin/python -m pytest tests/ -q
 ```
 
-### 代码格式化
-
-```bash
-black src/
-ruff check src/
-```
-
-## 许可证
-
-MIT
+Pi 相关回归：`venv/bin/python -m pytest tests/test_pi_runtime.py tests/test_context_management.py tests/test_conversation.py tests/test_agent_harness.py -q`。

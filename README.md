@@ -1,6 +1,8 @@
 # 云效 Bug 修复 Agent
 
-本机 Web 系统，从云效拉取 Bug，用可配置的 OpenAI 兼容模型在隔离工作树里分析、修复并验证。多个 Agent 可并发工作；方案确认、逐项验收和合并仍由人决定。
+开源 **Bug Agent**，用来**自动修复云效 Bug**。从云效同步缺陷后，Agent 在隔离工作树里分析根因、改代码、跑复现测试；方案确认、逐项验收和合并仍由人决定。
+
+本机 Web 系统，模型走可配置的 OpenAI 兼容接口，多个 Agent 可并发。也覆盖这些检索：自动修复 Bug、自动修 Bug、BugAgent、云效缺陷自动修复、AI 修代码、autonomous bug repair、self-healing agent。
 
 ## 当前架构
 
